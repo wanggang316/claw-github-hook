@@ -36,9 +36,10 @@ GitHub (reply posted via gh CLI)
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) 20+
-- [Cloudflare account](https://dash.cloudflare.com/)
-- [OpenClaw](https://openclaw.ai) running locally
-- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) exposing OpenClaw
+- [Cloudflare account](https://dash.cloudflare.com/) — sign up at https://dash.cloudflare.com/
+- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/) — `npm install -g wrangler`, then `wrangler login`
+- [OpenClaw](https://openclaw.ai) running locally with hooks enabled
+- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) exposing your local OpenClaw Gateway
 - [GitHub CLI (gh)](https://cli.github.com/) installed and authenticated on the OpenClaw machine
 
 ### 1. Install & Build
@@ -56,35 +57,79 @@ npm run check
 wrangler kv namespace create ROUTES_KV
 ```
 
-Copy the returned `id` into `wrangler.toml`.
+Copy the returned `id` into `wrangler.toml`, replacing the placeholder value.
 
 ### 3. Set Secrets
 
 ```bash
-wrangler secret put GITHUB_WEBHOOK_SECRET   # random string, same as GitHub webhook config
-wrangler secret put AUTO_REVIEW              # "true" or "false"
-wrangler secret put TOKEN_PROJ1              # OpenClaw hooks token
+wrangler secret put GITHUB_WEBHOOK_SECRET
+wrangler secret put AUTO_REVIEW
+wrangler secret put TOKEN_PROJ1
 ```
+
+How to get each value:
+
+| Secret | How to get it |
+|---|---|
+| `GITHUB_WEBHOOK_SECRET` | Generate a random string (e.g. `openssl rand -hex 32`). You'll use this same string when configuring the GitHub webhook in Step 6. |
+| `AUTO_REVIEW` | Enter `"true"` to automatically review every PR when opened, or `"false"` to only review when explicitly asked via `@mention /review`. |
+| `TOKEN_PROJ1` | From your OpenClaw config: this is the `token` value in your OpenClaw hooks configuration (e.g. in `~/.openclaw/config.json` under `hooks.token`). |
 
 ### 4. Upload Routes
 
+Routes tell the Worker which repos go to which OpenClaw agent. Each route maps a GitHub repo to an OpenClaw instance.
+
 ```bash
-wrangler kv key put routes '[
+wrangler kv key put routes '<JSON array>' --binding ROUTES_KV --remote
+```
+
+Example (single command, all on one line):
+
+```bash
+wrangler kv key put routes '[{"repo":"*","openclawUrl":"https://openclaw.example.com","openclawToken":"$TOKEN_PROJ1","agentId":"product-builder","ghAccount":"my-github-user"}]' --binding ROUTES_KV --remote
+```
+
+How to get each field:
+
+| Field | How to get it |
+|---|---|
+| `repo` | The GitHub repo to match, in `"owner/repo"` format. Use `"owner/*"` to match all repos under an owner. Use `"*"` as a catch-all default. |
+| `openclawUrl` | Your Cloudflare Tunnel URL that exposes OpenClaw. If using a named tunnel with custom domain: `"https://openclaw.yourdomain.com"`. If using a quick tunnel: the `*.trycloudflare.com` URL (changes on restart). |
+| `openclawToken` | Reference to a Worker Secret by name, prefixed with `$`. E.g. `"$TOKEN_PROJ1"` resolves to the value you set via `wrangler secret put TOKEN_PROJ1`. If you have multiple OpenClaw instances with different tokens, create multiple secrets (`TOKEN_PROJ1`, `TOKEN_PROJ2`, etc.). |
+| `agentId` | The OpenClaw agent ID to route to. Find it in your OpenClaw config — run `openclaw agents list` or check `~/.openclaw/agents/`. Examples: `"product-builder"`, `"code-reviewer"`, `"default"`. |
+| `ghAccount` | *(Optional)* Your GitHub username for this route. Used for two things: (1) the bot responds to `@ghAccount` mentions in comments, (2) runs `gh auth switch --user <ghAccount>` before any `gh` command. Find your GitHub username at https://github.com/settings/profile. |
+| `botMention` | *(Optional)* Override the trigger mention. If omitted, defaults to `@ghAccount` (if set) or `@claw`. Example: `"@my-ai-bot"`. |
+| `autoReview` | *(Optional)* `true` or `false`. Override the global `AUTO_REVIEW` setting for this specific repo. |
+
+Multi-repo example:
+
+```json
+[
   {
-    "repo": "myorg/myrepo",
-    "openclawUrl": "https://openclaw.example.com",
+    "repo": "myorg/backend",
+    "openclawUrl": "https://openclaw.mysite.com",
     "openclawToken": "$TOKEN_PROJ1",
-    "agentId": "product-builder",
-    "ghAccount": "my-github-user"
+    "agentId": "backend-dev",
+    "ghAccount": "my-bot-account"
+  },
+  {
+    "repo": "myorg/frontend",
+    "openclawUrl": "https://openclaw.mysite.com",
+    "openclawToken": "$TOKEN_PROJ1",
+    "agentId": "frontend-dev",
+    "ghAccount": "my-bot-account",
+    "autoReview": true
   },
   {
     "repo": "*",
-    "openclawUrl": "https://openclaw.example.com",
+    "openclawUrl": "https://openclaw.mysite.com",
     "openclawToken": "$TOKEN_PROJ1",
     "agentId": "product-builder"
   }
-]' --binding ROUTES_KV --remote
+]
 ```
+
+Route resolution priority: exact repo match → owner wildcard (`owner/*`) → global wildcard (`*`).
 
 ### 5. Deploy
 
@@ -92,16 +137,18 @@ wrangler kv key put routes '[
 wrangler deploy
 ```
 
+The output shows your Worker URL (e.g. `https://claw-github-hook.xxx.workers.dev`).
+
 ### 6. Configure GitHub Webhook
 
-In your GitHub repo: **Settings → Webhooks → Add webhook**
+In your GitHub repo (or org): **Settings → Webhooks → Add webhook**
 
-| Field | Value |
-|---|---|
-| Payload URL | Your Worker URL (e.g. `https://claw-github-hook.xxx.workers.dev`) |
-| Content type | `application/json` |
-| Secret | Same value as `GITHUB_WEBHOOK_SECRET` |
-| Events | Issues, Issue comments, Pull requests, PR review comments |
+| Field | Value | How to get it |
+|---|---|---|
+| Payload URL | Your Worker URL | From Step 5 output, e.g. `https://claw-github-hook.xxx.workers.dev` |
+| Content type | `application/json` | Select from dropdown |
+| Secret | Your webhook secret | The same random string you entered for `GITHUB_WEBHOOK_SECRET` in Step 3 |
+| Events | Individual events | Select "Let me select individual events", then check: **Issues**, **Issue comments**, **Pull requests**, **Pull request review comments** |
 
 ### 7. Install Skills in OpenClaw
 
@@ -111,32 +158,36 @@ Copy the skills to your OpenClaw workspace:
 cp -r skills/* ~/.openclaw/skills/
 ```
 
+Or symlink them so they stay in sync with this repo:
+
+```bash
+ln -s $(pwd)/skills/github-qa ~/.openclaw/skills/github-qa
+ln -s $(pwd)/skills/github-review ~/.openclaw/skills/github-review
+ln -s $(pwd)/skills/github-code-mod ~/.openclaw/skills/github-code-mod
+```
+
 ## Usage
 
-Once configured, mention the bot in any issue or PR comment:
+Once configured, mention the bot in any GitHub issue or PR comment to trigger it.
 
-| Command | Action |
+### Bot Mention
+
+The bot responds to mentions based on this priority:
+
+1. **`botMention`** in route config (if set) — e.g. `@my-ai-bot`
+2. **`@ghAccount`** (if `ghAccount` is set) — e.g. `@superada2026`
+3. **`@claw`** (default fallback)
+
+### Commands
+
+| Comment | Action |
 |---|---|
-| `@bot-name what does this function do?` | Q&A — agent answers the question |
-| `@bot-name /review` | Code Review — agent reviews the PR |
-| `@bot-name /fix null pointer in auth.ts` | Code Mod — agent fixes code and opens a PR |
-| `@bot-name /implement add input validation` | Code Mod — agent implements and opens a PR |
+| `@superada2026 what does this function do?` | **Q&A** — agent answers the question and posts a reply |
+| `@superada2026 /review` | **Code Review** — agent fetches the PR diff and posts a review |
+| `@superada2026 /fix null pointer in auth.ts` | **Code Mod** — agent fixes the code and opens a PR |
+| `@superada2026 /implement add input validation` | **Code Mod** — agent implements the feature and opens a PR |
 
-The bot mention defaults to `@ghAccount` (e.g., `@superada2026`). Override with `botMention` in the route config.
-
-## Route Config Reference
-
-| Field | Required | Description |
-|---|---|---|
-| `repo` | Yes | `"owner/repo"`, `"owner/*"`, or `"*"` |
-| `openclawUrl` | Yes | OpenClaw tunnel URL |
-| `openclawToken` | Yes | Token ref, e.g. `"$TOKEN_PROJ1"` |
-| `agentId` | Yes | OpenClaw agent ID |
-| `ghAccount` | No | GitHub username for `gh auth switch` |
-| `botMention` | No | Custom trigger (default: `@ghAccount` or `@claw`) |
-| `autoReview` | No | Auto-review PRs on open (overrides global) |
-
-Route resolution priority: exact repo → owner wildcard (`owner/*`) → global (`*`).
+*(Replace `@superada2026` with your configured bot mention.)*
 
 ## Development
 
