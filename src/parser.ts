@@ -1,47 +1,135 @@
+import { sanitize } from "./sanitize.js";
+
+export type EventType =
+  | "pr_opened"
+  | "pr_comment"
+  | "pr_review_comment"
+  | "pr_review"
+  | "issue_opened"
+  | "issue_comment"
+  | "unknown";
+
 export interface GitHubEvent {
   event: string;
   action: string;
+  eventType: EventType;
   repo: string;
   sender: string;
+  isBot: boolean;
+
+  // PR fields
   prTitle: string;
   prUrl: string;
   prNumber: number | null;
   prBaseBranch: string;
   prHeadBranch: string;
+  prBody: string;
+  prState: string;
+  prAdditions: number | null;
+  prDeletions: number | null;
+  prChangedFiles: number | null;
+  prCommits: number | null;
+  prMerged: boolean;
+
+  // Issue fields
   issueTitle: string;
   issueUrl: string;
   issueNumber: number | null;
+  issueBody: string;
+  issueState: string;
+  issueLabels: string[];
+
+  // Comment fields
   commentBody: string;
-  isBot: boolean;
+  commentId: number | null;
+
+  // Review fields (pull_request_review event)
+  reviewState: string;
+  reviewBody: string;
 }
 
 export function parseEvent(event: string, body: Record<string, unknown>): GitHubEvent {
   const repo = nested(body, "repository", "full_name") ?? "";
   const sender = nested(body, "sender", "login") ?? "";
+  const senderType = nested(body, "sender", "type") ?? "";
 
   const pr = body.pull_request as Record<string, unknown> | undefined;
   const issue = body.issue as Record<string, unknown> | undefined;
   const comment = body.comment as Record<string, unknown> | undefined;
+  const review = body.review as Record<string, unknown> | undefined;
 
   const prBase = pr?.base as Record<string, unknown> | undefined;
   const prHead = pr?.head as Record<string, unknown> | undefined;
 
-  return {
+  const action = str(body.action);
+
+  // Issue labels
+  const rawLabels = issue?.labels;
+  const issueLabels: string[] = [];
+  if (Array.isArray(rawLabels)) {
+    for (const label of rawLabels) {
+      if (typeof label === "object" && label !== null) {
+        const name = (label as Record<string, unknown>).name;
+        if (typeof name === "string") issueLabels.push(name);
+      }
+    }
+  }
+
+  const ev: GitHubEvent = {
     event,
-    action: str(body.action),
+    action,
+    eventType: "unknown",
     repo,
     sender,
-    prTitle: str(pr?.title),
+    isBot: sender.includes("[bot]") || senderType === "Bot",
+
+    prTitle: sanitize(str(pr?.title)),
     prUrl: str(pr?.html_url),
     prNumber: num(pr?.number),
     prBaseBranch: str(prBase?.ref),
     prHeadBranch: str(prHead?.ref),
-    issueTitle: str(issue?.title),
+    prBody: sanitize(str(pr?.body)),
+    prState: str(pr?.state),
+    prAdditions: num(pr?.additions),
+    prDeletions: num(pr?.deletions),
+    prChangedFiles: num(pr?.changed_files),
+    prCommits: num(pr?.commits),
+    prMerged: pr?.merged === true,
+
+    issueTitle: sanitize(str(issue?.title)),
     issueUrl: str(issue?.html_url),
     issueNumber: num(issue?.number),
-    commentBody: str(comment?.body),
-    isBot: sender.includes("[bot]"),
+    issueBody: sanitize(str(issue?.body)),
+    issueState: str(issue?.state),
+    issueLabels,
+
+    commentBody: sanitize(str(comment?.body)),
+    commentId: num(comment?.id),
+
+    reviewState: str(review?.state),
+    reviewBody: sanitize(str(review?.body)),
   };
+
+  ev.eventType = deriveEventType(event, action, ev);
+  return ev;
+}
+
+export function deriveEventType(event: string, action: string, ev: GitHubEvent): EventType {
+  switch (event) {
+    case "pull_request":
+      return "pr_opened";
+    case "pull_request_review_comment":
+      return "pr_review_comment";
+    case "pull_request_review":
+      return "pr_review";
+    case "issue_comment":
+      return ev.prNumber !== null ? "pr_comment" : "issue_comment";
+    case "issues":
+      if (action === "opened") return "issue_opened";
+      return "issue_comment";
+    default:
+      return "unknown";
+  }
 }
 
 function str(v: unknown): string {

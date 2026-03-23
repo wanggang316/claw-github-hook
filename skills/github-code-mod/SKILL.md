@@ -8,6 +8,19 @@ user-invocable: false
 
 You received a request to modify code in a GitHub repository. Your job is to understand the request fully, make the changes, and submit a PR.
 
+## Capabilities and Limitations
+
+**What you CAN do:**
+- Clone the repo, create a branch, make changes, push, and create a PR
+- Run tests, type checks, and linting
+- Post comments linking to the PR
+
+**What you CANNOT do:**
+- Push directly to main or master
+- Merge or close PRs
+- Delete branches
+- Modify files outside the scope of the request
+
 ## Prerequisites
 
 Before executing, verify `gh` is installed and authenticated:
@@ -21,7 +34,7 @@ If not installed, tell the user:
 
 ## GitHub Account
 
-If the message includes a `GitHub Account:` line, switch to that account first:
+If the message includes a `<gh_account>` tag, switch to that account first:
 
 ```bash
 gh auth switch --user <account>
@@ -29,20 +42,45 @@ gh auth switch --user <account>
 
 ## Input Format
 
-The message starts with `[GitHub Code Modification]` and contains:
-- **Repo**: the repository name (owner/repo)
-- **Requested by**: who requested the change
-- **Issue/PR reference**: context for the modification
-- **Instruction**: what needs to be done
-- **gh command hints**: commands for cloning and creating PRs
+The message contains XML-tagged sections:
+
+| Tag | Content |
+|-----|---------|
+| `<event_type>` | Event type: `pr_comment`, `issue_comment`, etc. |
+| `<trigger_context>` | Human-readable description of what triggered this |
+| `<trigger_username>` | Who requested the change |
+| `<is_pr>` | `true` if triggered from a PR, `false` if from an issue |
+| `<repo>` | Repository name (owner/repo) |
+| `<gh_account>` | GitHub account for `gh auth switch` (optional) |
+| `<comment_id>` | ID of the triggering comment (optional) |
+| `<pr_metadata>` | PR summary: number, title, state, stats, branch, URL (if PR) |
+| `<issue_metadata>` | Issue summary: number, title, state, labels, URL (if issue) |
+| `<pr_body>` | Full PR description (pre-fetched, if PR) |
+| `<issue_body>` | Full issue description (pre-fetched, if issue) |
+| `<trigger_comment>` | The modification instruction (mention and command stripped) |
+| `<instructions>` | Step-by-step instructions and gh command hints |
+
+## Immediate Feedback
+
+If `<comment_id>` is present, add a reaction to acknowledge receipt:
+
+```bash
+gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
+  --method POST --field content=eyes
+```
 
 ## Context Gathering (CRITICAL — Do NOT Skip)
 
-You MUST fully understand the request and the codebase before writing any code. Coding based solely on the triggering comment leads to wrong solutions that miss constraints and conventions.
+You MUST fully understand the request and the codebase before writing any code.
 
-### Step 1: Read the full issue/PR thread
+### What you already have (from XML tags):
+- `<pr_body>` or `<issue_body>` — the full description, no need to re-fetch
+- `<pr_metadata>` or `<issue_metadata>` — summary stats
+- `<trigger_comment>` — the specific instruction
 
-Understand the full discussion, prior decisions, and any rejected approaches:
+### What you still need to fetch:
+
+#### Step 1: Read the full comment thread
 
 ```bash
 # For issues:
@@ -52,93 +90,68 @@ gh issue view <number> --repo <owner/repo> --comments
 gh pr view <number> --repo <owner/repo> --comments
 ```
 
-### Step 2: If the issue/PR references commits or other PRs, read them
-
-Understand what has already been tried or changed:
+#### Step 2: If the issue/PR references commits or other PRs, read them
 
 ```bash
-# PR diff
 gh pr diff <number> --repo <owner/repo>
-
-# Specific commit
 gh api repos/<owner>/<repo>/commits/<sha> --jq '{message: .commit.message, files: [.files[] | {filename, status, additions, deletions}]}'
-
-# Referenced issue
 gh issue view <referenced-number> --repo <owner/repo> --comments
 ```
 
-### Step 3: Clone the repo
+#### Step 3: Clone the repo
 
 ```bash
 gh repo clone <owner/repo>
 cd <repo>
 ```
 
-### Step 4: Read project docs BEFORE writing any code
-
-This is essential — the project may have specific conventions, golden rules, or architecture constraints:
+#### Step 4: Read project docs BEFORE writing any code
 
 1. **`README.md`** — project overview, tech stack, build/test commands, dependencies
 2. **`CLAUDE.md` / `AGENTS.md`** — AI agent conventions, golden rules, coding standards. **You MUST follow these if present.**
 3. **`docs/` directory** — architecture docs, design docs, guides
-4. **`package.json` / `Makefile` / `Cargo.toml`** etc. — build commands, test commands, dependencies
+4. **`package.json` / `Makefile` / `Cargo.toml`** etc. — build commands, test commands
 
-### Step 5: Read source code in the area you'll modify
-
-Understand the existing patterns before changing anything:
+#### Step 5: Read source code in the area you'll modify
 
 ```bash
-# Read the files you'll modify
 cat <file-path>
-
-# Read adjacent files to understand patterns and imports
 cat <related-file-path>
-
-# Search for usage of functions/types you'll change
 grep -r "<function-name>" src/
 ```
 
-Understand:
-- How the code you'll change is called by other code
-- Existing naming conventions and code style
-- Import/export patterns
-- Error handling patterns
-- Test file locations and testing patterns
+Understand: how the code is called, naming conventions, import/export patterns, error handling, test patterns.
 
 ## Steps
 
-1. **Gather context** following all steps above
+1. **Add 👀 reaction** (if `<comment_id>` available)
 
-2. **Identify the base branch**:
+2. **Gather context** following all steps above
+
+3. **Set up your branch** — check the `<branch_strategy>` tag:
+   - If `checkout_pr`: check out the existing PR branch:
+     ```bash
+     gh pr checkout <number> --repo <owner/repo>
+     ```
+   - If `new_branch`: identify the base branch and create a new one:
+     ```bash
+     git remote show origin | grep 'HEAD branch'
+     git checkout -b claw/<short-description>
+     ```
+
+5. **Plan your changes** — list the files you'll modify and why
+
+6. **Make the changes** — keep them minimal and focused on the request
+
+7. **Verify your changes**:
    ```bash
-   git remote show origin | grep 'HEAD branch'
-   ```
-
-3. **Create a new branch** from the base branch:
-   ```bash
-   git checkout -b claw/<short-description>
-   ```
-
-4. **Plan your changes** — before editing, list the files you'll modify and why
-
-5. **Make the changes** — keep them minimal and focused on the request
-
-6. **Verify your changes**:
-   ```bash
-   # Review what you changed
    git diff
-
-   # Run type checks if available
    npm run check 2>/dev/null || npx tsc --noEmit 2>/dev/null || true
-
-   # Run tests if available (check README or package.json for the command)
    npm test 2>/dev/null || make test 2>/dev/null || cargo test 2>/dev/null || true
-
-   # Run linting if available
    npm run lint 2>/dev/null || true
    ```
 
-7. **Commit and push**:
+8. **Commit and push**:
    ```bash
    git add <changed-files>
    git commit -m "<type>: <description>"
@@ -146,7 +159,7 @@ Understand:
    ```
    Use conventional commit types: `fix:`, `feat:`, `refactor:`, `docs:`, `test:`, `chore:`
 
-8. **Create a PR**:
+9. **Create a PR**:
    ```bash
    gh pr create --repo <owner/repo> \
      --title "<concise title>" \
@@ -161,15 +174,17 @@ Understand:
    Closes #<issue-number>
 
    ---
-   🤖 Automated by [OpenClaw](https://openclaw.ai)
+   Automated by [OpenClaw](https://openclaw.ai)
    EOF
    )"
    ```
 
-9. **Post a comment** on the original issue/PR linking to the new PR:
-   ```bash
-   gh issue comment <number> --repo <owner/repo> --body "I've created PR #<pr-number> to address this: <pr-url>"
-   ```
+10. **Post a comment** on the original issue/PR linking to the new PR:
+    ```bash
+    gh issue comment <number> --repo <owner/repo> --body "I've created PR #<pr-number> to address this: <pr-url>"
+    ```
+
+11. **Add 🚀 reaction** when done (if `<comment_id>` available)
 
 ## Constraints
 

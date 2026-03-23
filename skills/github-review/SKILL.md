@@ -1,12 +1,26 @@
 ---
-
-## name: github-review
+name: github-review
 description: Perform code review on a GitHub pull request using the gh CLI.
 user-invocable: false
+---
 
 # GitHub Code Review
 
 You received a request to review a GitHub pull request. Your job is to provide a thorough, constructive review.
+
+## Capabilities and Limitations
+
+**What you CAN do:**
+- Review code for correctness, security, architecture, and quality
+- Post a review comment with detailed feedback
+- Reference specific files, line numbers, and code patterns
+- Read any file in the repository via `gh` CLI
+
+**What you CANNOT do:**
+- Approve or request changes (use `--comment` only, not `--approve` or `--request-changes`)
+- Modify the PR code directly
+- Merge, close, or reopen PRs
+- Post multiple review comments (consolidate into one review)
 
 ## Prerequisites
 
@@ -17,12 +31,11 @@ gh --version
 ```
 
 If not installed, tell the user:
-
-> `gh` CLI is required. Install it: [https://cli.github.com/](https://cli.github.com/)
+> `gh` CLI is required. Install it: https://cli.github.com/
 
 ## GitHub Account
 
-If the message includes a `GitHub Account:` line, switch to that account first:
+If the message includes a `<gh_account>` tag, switch to that account first:
 
 ```bash
 gh auth switch --user <account>
@@ -30,131 +43,142 @@ gh auth switch --user <account>
 
 ## Input Format
 
-The message starts with `[GitHub Code Review]` and contains:
+The message contains XML-tagged sections:
 
-- **Repo**: the repository name (owner/repo)
-- **Author**: who opened the PR
-- **PR number, title, URL**: the pull request to review
-- **Branch info**: source and target branches
-- **gh command hints**: commands to fetch diff and post review
+| Tag | Content |
+|-----|---------|
+| `<event_type>` | Event type: `pr_opened`, `pr_comment`, `pr_review`, etc. |
+| `<trigger_context>` | Human-readable description of what triggered this |
+| `<trigger_username>` | Who requested the review |
+| `<is_pr>` | Always `true` for code reviews |
+| `<repo>` | Repository name (owner/repo) |
+| `<gh_account>` | GitHub account for `gh auth switch` (optional) |
+| `<comment_id>` | ID of the triggering comment (optional) |
+| `<pr_metadata>` | PR summary: number, title, state, +additions/-deletions, files, commits, branch, URL |
+| `<pr_body>` | Full PR description (pre-fetched from webhook) |
+| `<trigger_comment>` | Specific review instructions (optional, for comment-triggered reviews) |
+| `<instructions>` | gh command hints for fetching diff and posting review |
+
+## Immediate Feedback
+
+If `<comment_id>` is present, add a reaction to acknowledge receipt:
+
+```bash
+gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
+  --method POST --field content=eyes
+```
 
 ## Context Gathering (CRITICAL — Do NOT Skip)
 
-You MUST fully understand the PR before reviewing. Reviewing based solely on the diff leads to shallow, unhelpful feedback.
+You MUST fully understand the PR before reviewing. The message includes pre-fetched data — use it, then fill gaps.
 
-### Step 1: Read the full PR description and all comments
+### What you already have (from XML tags):
+- `<pr_body>` — full PR description, no need to re-fetch
+- `<pr_metadata>` — PR stats (additions, deletions, files, commits, branch info)
 
-Understand the motivation, design decisions, and any prior review feedback:
+### What you still need to fetch:
+
+#### Step 1: Read the full PR comment thread
 
 ```bash
 gh pr view <number> --repo <owner/repo> --comments
 ```
 
-### Step 2: Read all commits in the PR
-
-Understand the change history — commits tell the story of how the change evolved:
+#### Step 2: Read all commits in the PR
 
 ```bash
-# List all commits
 gh pr view <number> --repo <owner/repo> --json commits --jq '.commits[] | "\(.oid[:8]) \(.messageHeadline)"'
 
-# Read individual commit details when needed
+# For individual commit details:
 gh api repos/<owner>/<repo>/commits/<sha> --jq '{message: .commit.message, files: [.files[] | {filename, status, additions, deletions}]}'
 ```
 
-### Step 3: List all changed files with stats
-
-Get an overview of the change scope before diving into the diff:
+#### Step 3: List all changed files with stats
 
 ```bash
 gh pr view <number> --repo <owner/repo> --json files --jq '.files[] | "\(.path) (\(.status)) +\(.additions) -\(.deletions)"'
 ```
 
-### Step 4: Read existing review comments
-
-Avoid duplicating feedback that's already been given:
+#### Step 4: Read existing review comments (avoid duplication)
 
 ```bash
 gh api repos/<owner>/<repo>/pulls/<number>/reviews --jq '.[] | "\(.user.login) (\(.state)): \(.body)"'
 gh api repos/<owner>/<repo>/pulls/<number>/comments --jq '.[] | "\(.user.login) on \(.path):\(.line): \(.body)"'
 ```
 
-### Step 5: If the PR references an issue, read it
-
-The linked issue contains the requirements — review against them:
+#### Step 5: If the PR references an issue, read it
 
 ```bash
 gh issue view <issue-number> --repo <owner/repo> --comments
 ```
 
-### Step 6: Clone the repo and read project docs
-
-This is essential for understanding conventions and architecture:
+#### Step 6: Clone the repo and read project docs
 
 ```bash
 gh repo clone <owner/repo>
 cd <repo>
 ```
 
-Read these files in order of priority:
+Read in order of priority:
+1. **`README.md`** — project overview, tech stack
+2. **`CLAUDE.md` / `AGENTS.md`** — AI agent conventions, golden rules, coding standards
+3. **`docs/` directory** — architecture docs, design docs
+4. **Source files adjacent to the changed files** — understand surrounding code
 
-1. `**README.md**` — project overview, tech stack, build/test commands
-2. `**CLAUDE.md` / `AGENTS.md**` — AI agent conventions, golden rules, coding standards
-3. `**docs/` directory** — architecture docs, design docs, golden rules
-4. **Source files adjacent to the changed files** — understand the surrounding code
+#### Step 7: Read source files beyond the diff
 
-### Step 7: Read source files beyond the diff
-
-The diff alone doesn't show the full picture. Read the complete files being modified to understand:
-
+Read complete files being modified to understand:
 - How changed functions are called by other code
 - Whether the change is consistent with surrounding patterns
 - Whether imports/exports are properly updated
 
 ```bash
-# Read complete file (if cloned)
-cat <file-path>
-
-# Or via API (without cloning)
+# Via API (without cloning)
 gh api repos/<owner>/<repo>/contents/<file-path> --jq '.content' | base64 -d
 ```
 
 ## Steps
 
-1. Gather context following all steps above
-2. Fetch the full PR diff:
-  ```bash
+1. Add 👀 reaction (if `<comment_id>` available)
+2. Use pre-fetched `<pr_body>` and `<pr_metadata>` — skip re-fetching these
+3. Fetch remaining context (comments, commits, diff, reviews, source)
+4. Fetch the full PR diff:
+   ```bash
    gh pr diff <number> --repo <owner/repo>
-  ```
-3. Review the changes against these criteria:
-  **Correctness**
-  - Logic errors, off-by-one, null/undefined handling
-  - Edge cases not covered
-  - Race conditions or async issues
-  - Whether the change actually solves the linked issue
+   ```
+5. Review the changes against these criteria:
+
+   **Correctness**
+   - Logic errors, off-by-one, null/undefined handling
+   - Edge cases not covered
+   - Race conditions or async issues
+   - Whether the change actually solves the linked issue
+
    **Security**
-  - Injection vulnerabilities (SQL, XSS, command injection)
-  - Auth/authz bypass
-  - Secrets or credentials exposure
-  - Input validation at system boundaries
+   - Injection vulnerabilities (SQL, XSS, command injection)
+   - Auth/authz bypass
+   - Secrets or credentials exposure
+   - Input validation at system boundaries
+
    **Architecture & Design**
-  - Consistency with existing patterns and project conventions
-  - Compliance with CLAUDE.md / AGENTS.md guidelines if present
-  - Proper separation of concerns
-  - Whether the approach is the simplest that works
+   - Consistency with existing patterns and project conventions
+   - Compliance with CLAUDE.md / AGENTS.md guidelines if present
+   - Proper separation of concerns
+   - Whether the approach is the simplest that works
+
    **Code Quality**
-  - Clear naming and structure
-  - Unnecessary duplication
-  - Dead code or unused imports
-  - Proper error handling
+   - Clear naming and structure
+   - Unnecessary duplication
+   - Dead code or unused imports
+   - Proper error handling
+
    **Tests**
-  - Missing test coverage for new behavior
-  - Whether existing tests still pass conceptually
-  - Edge cases that should be tested
-4. Post your review:
-  ```bash
-   gh pr review <number> --repo <owner/repo> --comment --body "Your review here"
-  ```
+   - Missing test coverage for new behavior
+   - Whether existing tests still pass conceptually
+   - Edge cases that should be tested
+
+6. Post your review using the gh command from `<instructions>`
+7. Add 🚀 reaction when done (if `<comment_id>` available)
 
 ## Review Format
 
@@ -180,9 +204,9 @@ Structure your review for clarity and actionability:
 - [Things done well — reinforce good practices]
 ```
 
-- **Reference specific file paths and line numbers** for every issue (e.g., `src/router.ts:42`)
-- **Provide concrete fix suggestions** in code blocks, not just descriptions of problems
-- **Link to relevant files** when helpful: `https://github.com/<owner>/<repo>/blob/<branch>/<path>#L<line>`
+- **Reference specific file paths and line numbers** for every issue
+- **Provide concrete fix suggestions** in code blocks
+- **Link to relevant files**: `https://github.com/<owner>/<repo>/blob/<branch>/<path>#L<line>`
 - **Categorize severity**: Critical (must fix), Major (should fix), Minor (consider fixing)
 
 ## Constraints
@@ -194,4 +218,3 @@ Structure your review for clarity and actionability:
 - Never expose tokens, secrets, or credentials in your review
 - Respect the project's conventions — don't push personal style preferences
 - If a change is large, prioritize the most impactful feedback
-

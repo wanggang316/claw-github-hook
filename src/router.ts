@@ -8,6 +8,7 @@ export function routeIntent(ev: GitHubEvent, autoReview: boolean, botMention: st
   const comment = ev.commentBody.toLowerCase();
   const mention = botMention.toLowerCase();
 
+  // Command routing from comments (any event with a comment mentioning the bot)
   if (comment.includes(`${mention} /fix`) || comment.includes(`${mention} /implement`)) {
     return "code-mod";
   }
@@ -20,7 +21,8 @@ export function routeIntent(ev: GitHubEvent, autoReview: boolean, botMention: st
     return "qa";
   }
 
-  if (ev.event === "pull_request" && ev.action === "opened" && autoReview) {
+  // Auto-review on PR opened
+  if (ev.eventType === "pr_opened" && ev.action === "opened" && autoReview) {
     return "code-review";
   }
 

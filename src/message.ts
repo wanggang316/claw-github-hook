@@ -15,89 +15,183 @@ export function buildMessage(ev: GitHubEvent, intent: Intent, route: RouteConfig
   }
 }
 
+// ---------------------------------------------------------------------------
+// QA
+// ---------------------------------------------------------------------------
+
 function buildQAMessage(ev: GitHubEvent, route: RouteConfig): string {
-  const mention = route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
+  const mention = botMention(route);
   const question = stripMention(ev.commentBody, mention);
-  const ref = ev.prNumber
-    ? `PR #${ev.prNumber}: ${ev.prTitle}\n${ev.prUrl}`
-    : ev.issueNumber
-      ? `Issue #${ev.issueNumber}: ${ev.issueTitle}\n${ev.issueUrl}`
-      : "";
-
-  const lines = [
-    `[GitHub Q&A] Repo: ${ev.repo}`,
-    `Sender: ${ev.sender}`,
-    ref,
-    ghAccountLine(route),
-    "",
-    `Question: ${question}`,
-    "",
-    `Reply by posting a comment on the ${ev.prNumber ? "PR" : "issue"} using the gh CLI.`,
-    replyHint(ev),
-  ];
-
-  return lines.filter(Boolean).join("\n");
-}
-
-function buildCodeReviewMessage(ev: GitHubEvent, route: RouteConfig): string {
-  const prRef = ev.prNumber
-    ? `PR #${ev.prNumber}: ${ev.prTitle}\nURL: ${ev.prUrl}\nBranch: ${ev.prHeadBranch} -> ${ev.prBaseBranch}`
-    : "";
 
   return [
-    `[GitHub Code Review] Repo: ${ev.repo}`,
-    `Author: ${ev.sender}`,
-    prRef,
-    ghAccountLine(route),
-    "",
-    "Review the PR for correctness, security, and code quality.",
-    "",
-    `Use the gh CLI to fetch the diff and post a review:`,
-    `  gh pr diff ${ev.prNumber} --repo ${ev.repo}`,
-    `  gh pr review ${ev.prNumber} --repo ${ev.repo} --comment --body "..."`,
-  ].filter(Boolean).join("\n");
+    xmlMeta(ev, route, `${ev.sender} asked a question`),
+    xmlEntityContext(ev),
+    xmlBody(ev),
+    tag("trigger_comment", question),
+    tag("instructions", [
+      `[GitHub Q&A]`,
+      `Answer the question clearly and helpfully, then post your reply using the gh CLI.`,
+      ``,
+      replyHint(ev),
+    ].join("\n")),
+  ].join("\n\n");
 }
 
+// ---------------------------------------------------------------------------
+// Code Review
+// ---------------------------------------------------------------------------
+
+function buildCodeReviewMessage(ev: GitHubEvent, route: RouteConfig): string {
+  return [
+    xmlMeta(ev, route, `Code review requested by ${ev.sender}`),
+    xmlEntityContext(ev),
+    xmlBody(ev),
+    ev.commentBody ? tag("trigger_comment", stripMention(ev.commentBody, botMention(route))) : "",
+    tag("instructions", [
+      `[GitHub Code Review]`,
+      `Review the PR for correctness, security, and code quality.`,
+      ``,
+      `Use the gh CLI to fetch the diff and post a review:`,
+      `  gh pr diff ${ev.prNumber} --repo ${ev.repo}`,
+      `  gh pr review ${ev.prNumber} --repo ${ev.repo} --comment --body "..."`,
+    ].join("\n")),
+  ].filter(Boolean).join("\n\n");
+}
+
+// ---------------------------------------------------------------------------
+// Code Modification
+// ---------------------------------------------------------------------------
+
 function buildCodeModMessage(ev: GitHubEvent, route: RouteConfig): string {
-  const mention = route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
+  const mention = botMention(route);
   const instruction = stripMention(ev.commentBody, mention)
     .replace(/^\/fix\s*/i, "")
     .replace(/^\/implement\s*/i, "")
     .trim();
 
-  const ref = ev.prNumber
-    ? `PR #${ev.prNumber}: ${ev.prTitle}\n${ev.prUrl}`
-    : ev.issueNumber
-      ? `Issue #${ev.issueNumber}: ${ev.issueTitle}\n${ev.issueUrl}`
-      : "";
-
   return [
-    `[GitHub Code Modification] Repo: ${ev.repo}`,
-    `Requested by: ${ev.sender}`,
-    ref,
-    ghAccountLine(route),
-    "",
-    `Instruction: ${instruction}`,
-    "",
-    "Steps:",
-    `1. Clone: gh repo clone ${ev.repo}`,
-    "2. Create a new branch",
-    "3. Make the requested code changes",
-    `4. Push and create PR: gh pr create --repo ${ev.repo}`,
-  ].filter(Boolean).join("\n");
+    xmlMeta(ev, route, `Code modification requested by ${ev.sender}`),
+    xmlEntityContext(ev),
+    xmlBody(ev),
+    tag("trigger_comment", instruction),
+    branchStrategy(ev),
+    tag("instructions", [
+      `[GitHub Code Modification]`,
+      `Make the requested code changes, then submit a PR.`,
+      ``,
+      `Steps:`,
+      `1. Clone: gh repo clone ${ev.repo}`,
+      `2. Create a new branch (or check out existing PR branch — see <branch_strategy>)`,
+      `3. Make the requested code changes`,
+      `4. Push and create PR: gh pr create --repo ${ev.repo}`,
+    ].join("\n")),
+  ].filter(Boolean).join("\n\n");
 }
 
-function ghAccountLine(route: RouteConfig): string {
-  if (!route.ghAccount) return "";
-  return `GitHub Account: ${route.ghAccount} (run \`gh auth switch --user ${route.ghAccount}\` before any gh command)`;
+// ---------------------------------------------------------------------------
+// XML building blocks
+// ---------------------------------------------------------------------------
+
+function xmlMeta(ev: GitHubEvent, route: RouteConfig, triggerContext: string): string {
+  const lines = [
+    tag("event_type", ev.eventType),
+    tag("trigger_context", triggerContext),
+    tag("trigger_username", ev.sender),
+    tag("is_pr", ev.prNumber !== null ? "true" : "false"),
+    tag("repo", ev.repo),
+  ];
+
+  if (route.ghAccount) {
+    lines.push(tag("gh_account", route.ghAccount));
+  }
+
+  if (ev.commentId !== null) {
+    lines.push(tag("comment_id", String(ev.commentId)));
+  }
+
+  return lines.join("\n");
+}
+
+function xmlEntityContext(ev: GitHubEvent): string {
+  if (ev.prNumber !== null) {
+    const stats = [
+      ev.prState ? `State: ${ev.prState}` : "",
+      ev.prAdditions !== null ? `+${ev.prAdditions}` : "",
+      ev.prDeletions !== null ? `-${ev.prDeletions}` : "",
+      ev.prChangedFiles !== null ? `${ev.prChangedFiles} files` : "",
+      ev.prCommits !== null ? `${ev.prCommits} commits` : "",
+    ].filter(Boolean).join(" | ");
+
+    const content = [
+      `PR #${ev.prNumber}: ${ev.prTitle}`,
+      stats,
+      `Branch: ${ev.prHeadBranch} → ${ev.prBaseBranch}`,
+      `URL: ${ev.prUrl}`,
+    ].filter(Boolean).join("\n");
+
+    return tag("pr_metadata", content);
+  }
+
+  if (ev.issueNumber !== null) {
+    const labels = ev.issueLabels.length > 0
+      ? `Labels: ${ev.issueLabels.join(", ")}`
+      : "";
+    const content = [
+      `Issue #${ev.issueNumber}: ${ev.issueTitle}`,
+      ev.issueState ? `State: ${ev.issueState}` : "",
+      labels,
+      `URL: ${ev.issueUrl}`,
+    ].filter(Boolean).join("\n");
+
+    return tag("issue_metadata", content);
+  }
+
+  return "";
+}
+
+function xmlBody(ev: GitHubEvent): string {
+  const parts: string[] = [];
+
+  if (ev.prNumber !== null && ev.prBody) {
+    parts.push(tag("pr_body", ev.prBody));
+  }
+
+  if (ev.issueNumber !== null && ev.issueBody) {
+    parts.push(tag("issue_body", ev.issueBody));
+  }
+
+  return parts.join("\n\n");
+}
+
+function tag(name: string, content: string): string {
+  return `<${name}>\n${content}\n</${name}>`;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function branchStrategy(ev: GitHubEvent): string {
+  if (ev.prNumber !== null && ev.prState === "open") {
+    return tag("branch_strategy", [
+      `checkout_pr`,
+      `This is an open PR. Check out the existing PR branch instead of creating a new one:`,
+      `  gh pr checkout ${ev.prNumber} --repo ${ev.repo}`,
+    ].join("\n"));
+  }
+  return tag("branch_strategy", "new_branch\nCreate a new feature branch for this change.");
+}
+
+function botMention(route: RouteConfig): string {
+  return route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
 }
 
 function replyHint(ev: GitHubEvent): string {
   if (ev.issueNumber) {
-    return `  gh issue comment ${ev.issueNumber} --repo ${ev.repo} --body "..."`;
+    return `Reply: gh issue comment ${ev.issueNumber} --repo ${ev.repo} --body "..."`;
   }
   if (ev.prNumber) {
-    return `  gh pr comment ${ev.prNumber} --repo ${ev.repo} --body "..."`;
+    return `Reply: gh pr comment ${ev.prNumber} --repo ${ev.repo} --body "..."`;
   }
   return "";
 }
