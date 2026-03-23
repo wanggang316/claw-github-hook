@@ -3,7 +3,7 @@
 **Status:** Active
 **Author:** Planner Agent
 **Created:** 2026-03-23
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-23 (rev 2 — multi-repo routing)
 
 ## Purpose / Big Picture
 
@@ -23,7 +23,10 @@ The user has a working but unstructured proof-of-concept Cloudflare Worker (inli
 - **OpenClaw** — Local AI agent runner. Exposes a webhook endpoint at `/hooks/agent`. Configured with `token`, `defaultSessionKey: "hook:github"`, and `allowedAgentIds: ["product-builder"]`. Because `allowRequestSessionKey: false`, all events share a single session named `hook:github` — this is a known constraint and is not worked around.
 - **Intent** — A classification of what the GitHub event is asking for: `qa`, `code-review`, `code-mod`, or `ignore`. Routing is a pure function of the event payload.
 - **HMAC-SHA256** — GitHub signs every webhook payload with a secret using HMAC-SHA256, delivered in the `X-Hub-Signature-256` header. Verification uses only the Web Crypto API (no npm dependencies).
-- **Cloudflare Tunnel URL** — The URL of the running `cloudflared` tunnel that exposes the local OpenClaw instance. Stored as a Worker Secret (`OPENCLAW_URL`).
+- **Cloudflare Tunnel URL** — The URL of the running `cloudflared` tunnel that exposes the local OpenClaw instance. Stored per-route in the KV routes config (`openclawUrl` field of `RouteConfig`).
+- **RouteConfig** — A per-repo routing record that maps a GitHub repo (or wildcard) to a specific OpenClaw instance, token reference, and agent ID. Stored as a JSON array in Cloudflare KV under the key `routes`. See Phase 1b for the full schema.
+- **Token indirection** — `openclawToken` in a `RouteConfig` stores an env-var name (e.g. `$TOKEN_PROJ1`) rather than the secret value itself. At runtime the Worker resolves this reference against its own environment bindings. This keeps actual secrets out of KV (which is not a secret store) and allows tokens to be rotated via `wrangler secret put` without editing the routing table.
+- **Cloudflare KV** — A key-value store available to Workers at runtime. The `ROUTES_KV` namespace binding holds a single JSON key (`routes`) containing the full routing table. KV can be updated via the Cloudflare dashboard or API without redeploying the Worker.
 
 ### File Map (after this plan completes)
 
@@ -35,7 +38,9 @@ claw-github-hook/
 │   ├── parser.ts         — Parse raw GitHub JSON payload → typed GitHubEvent
 │   ├── router.ts         — Intent routing (pure function): qa / code-review / code-mod / ignore
 │   ├── message.ts        — Build structured message string per intent
-│   └── openclaw.ts       — POST structured message to OpenClaw /hooks/agent
+│   ├── openclaw.ts       — POST structured message to OpenClaw /hooks/agent
+│   ├── config.ts         — Load and validate RouteConfig[] from KV; resolve token refs from env
+│   └── types.ts          — Shared TypeScript types: RouteConfig, Env (with KV binding)
 ├── skills/
 │   ├── github-qa/
 │   │   └── SKILL.md      — Guides product-builder agent to answer GitHub questions
@@ -45,7 +50,8 @@ claw-github-hook/
 │       └── SKILL.md      — Guides product-builder agent to make code changes
 ├── wrangler.toml         — Cloudflare Worker configuration
 ├── package.json          — Project manifest and dev dependencies
-└── tsconfig.json         — TypeScript configuration for Workers runtime
+├── tsconfig.json         — TypeScript configuration for Workers runtime
+└── .env.example          — Documents required secrets (values are placeholders, never real secrets)
 ```
 
 ### Layer Mapping (per architecture.md)
@@ -54,12 +60,12 @@ The Worker pipeline maps to the project's layer model as follows:
 
 | Layer | File(s) |
 |---|---|
-| Types | Interfaces defined in `parser.ts` (`GitHubEvent`, `Intent`) |
-| Config | `wrangler.toml`, environment secrets (`GITHUB_WEBHOOK_SECRET`, `OPENCLAW_URL`, `OPENCLAW_TOKEN`, `AUTO_REVIEW`) |
-| Service | `verify.ts`, `parser.ts`, `router.ts`, `message.ts`, `openclaw.ts` |
+| Types | `types.ts` (`RouteConfig`, `Env`); interfaces in `parser.ts` (`GitHubEvent`, `Intent`) |
+| Config | `wrangler.toml`, KV namespace `ROUTES_KV`, env secrets (`GITHUB_WEBHOOK_SECRET`, `AUTO_REVIEW`, per-route token secrets) |
+| Service | `verify.ts`, `parser.ts`, `router.ts`, `message.ts`, `openclaw.ts`, `config.ts` |
 | Runtime | `src/index.ts` (Worker `fetch` handler) |
 
-Dependencies flow strictly: `index.ts` imports from all service modules; service modules do not import from `index.ts`. `router.ts` imports types from `parser.ts`. `message.ts` imports types from `parser.ts` and `router.ts`. No circular dependencies.
+Dependencies flow strictly: `index.ts` imports from all service modules; service modules do not import from `index.ts`. `router.ts` imports types from `parser.ts`. `message.ts` imports types from `parser.ts` and `router.ts`. `config.ts` imports from `types.ts`. `openclaw.ts` imports from `types.ts`. No circular dependencies.
 
 ## Plan of Work
 
@@ -69,7 +75,94 @@ Set up the TypeScript project targeting the Cloudflare Workers runtime. This is 
 
 1. Create `package.json` with `wrangler` as a dev dependency and a `"type": "module"` declaration. Add scripts: `dev` (wrangler dev), `deploy` (wrangler deploy), `check` (tsc --noEmit).
 2. Create `tsconfig.json` targeting ES2022, using the `@cloudflare/workers-types` lib, with `moduleResolution: "bundler"` and `strict: true`.
-3. Create `wrangler.toml` declaring the Worker name (`claw-github-hook`), main entry (`src/index.ts`), compatibility date, and listing the four expected secrets: `GITHUB_WEBHOOK_SECRET`, `OPENCLAW_URL`, `OPENCLAW_TOKEN`, `AUTO_REVIEW`.
+3. Create `wrangler.toml` declaring the Worker name (`claw-github-hook`), main entry (`src/index.ts`), and compatibility date. List the two global secrets: `GITHUB_WEBHOOK_SECRET` and `AUTO_REVIEW`. The KV namespace binding and per-route token secrets are added in Phase 1b.
+4. Create `.env.example` listing the two global secrets with placeholder values (e.g. `GITHUB_WEBHOOK_SECRET=your-webhook-secret-here`). This file is committed to the repo. It will be extended in Phase 1b to document the per-route token pattern.
+
+### Phase 1b — Multi-Repo Routing Config
+
+Define the routing data model, KV binding, and config-loading module. This must be done before Phase 2 because `openclaw.ts` and `index.ts` depend on `RouteConfig`.
+
+**`src/types.ts`**
+
+Defines and exports two types:
+
+```typescript
+export interface RouteConfig {
+  repo: string;          // "owner/repo", "owner/*", or "*"
+  openclawUrl: string;   // e.g. "https://xxx.trycloudflare.com"
+  openclawToken: string; // env-var name to resolve, e.g. "$TOKEN_PROJ1"
+  agentId: string;       // OpenClaw agent ID, e.g. "product-builder"
+  autoReview?: boolean;  // overrides global AUTO_REVIEW for this repo
+}
+
+export interface Env {
+  GITHUB_WEBHOOK_SECRET: string;
+  AUTO_REVIEW: string;    // global fallback: "true" | "false"
+  ROUTES_KV: KVNamespace; // Cloudflare KV binding
+  [key: string]: unknown; // allows dynamic token resolution
+}
+```
+
+The index signature `[key: string]: unknown` is required for TypeScript to allow dynamic property access when resolving token env-var references at runtime.
+
+**`src/config.ts`**
+
+Exports two functions:
+
+`loadRoutes(kv: KVNamespace): Promise<RouteConfig[]>` — Fetches the `routes` key from KV, parses the JSON value, and validates it is an array. Returns an empty array if the key is absent or the value is not a valid array. Validation uses type guards (not a runtime schema library) to keep the bundle dependency-free.
+
+`resolveRoute(repo: string, routes: RouteConfig[]): RouteConfig | null` — Applies the following match order and returns the first match, or `null` if none found:
+1. Exact match: `route.repo === repo`
+2. Owner-wildcard match: `route.repo === owner + "/*"` where `owner` is the `owner` segment of the requested repo.
+3. Global wildcard: `route.repo === "*"`
+
+`resolveToken(tokenRef: string, env: Env): string` — If `tokenRef` starts with `$`, looks up `env[tokenRef.slice(1)]` as a string. If it does not start with `$`, returns the value as-is (treated as a literal token, useful for development). Throws if the referenced env var is absent or not a string.
+
+**`wrangler.toml` update**
+
+Add a `[[kv_namespaces]]` binding:
+
+```toml
+[[kv_namespaces]]
+binding = "ROUTES_KV"
+id = "<KV namespace ID to be filled in after `wrangler kv:namespace create`>"
+```
+
+Remove the now-redundant global `OPENCLAW_URL` and `OPENCLAW_TOKEN` vars/secrets (per-route values replace them). Keep `GITHUB_WEBHOOK_SECRET` and `AUTO_REVIEW` as global secrets.
+
+**`src/index.ts` update**
+
+After signature verification and before intent routing, call `loadRoutes(env.ROUTES_KV)` and `resolveRoute(ev.repo, routes)`. If `resolveRoute` returns `null`, return `new Response("ok", { status: 200 })` silently (no matching route = ignore). Pass the resolved `RouteConfig` into `forwardToOpenClaw` instead of global env vars.
+
+**`src/openclaw.ts` update**
+
+Change the signature of `forwardToOpenClaw` to accept a `RouteConfig` and `Env` rather than bare `url` and `token` strings:
+
+```typescript
+forwardToOpenClaw(route: RouteConfig, env: Env, message: string): Promise<void>
+```
+
+Inside the function, resolve the token via `resolveToken(route.openclawToken, env)` and use `route.openclawUrl` and `route.agentId` instead of the hardcoded global equivalents. The `sessionKey` remains hardcoded to `"hook:github"`.
+
+**`.env.example` update**
+
+Remove `OPENCLAW_URL` and `OPENCLAW_TOKEN` from the global secrets list. Add a block explaining that per-route tokens are set as Worker Secrets whose names match the `openclawToken` values in the KV routes config, for example:
+
+```
+# Per-route token secrets (names must match openclawToken values in KV routes config)
+TOKEN_PROJ1=your-openclaw-token-for-project-1-here
+TOKEN_PROJ2=your-openclaw-token-for-project-2-here
+```
+
+Add a comment block showing a sample `routes` JSON value for KV:
+
+```json
+[
+  { "repo": "acme/backend",   "openclawUrl": "https://abc.trycloudflare.com", "openclawToken": "$TOKEN_PROJ1", "agentId": "product-builder" },
+  { "repo": "acme/frontend",  "openclawUrl": "https://def.trycloudflare.com", "openclawToken": "$TOKEN_PROJ2", "agentId": "product-builder" },
+  { "repo": "*",              "openclawUrl": "https://abc.trycloudflare.com", "openclawToken": "$TOKEN_PROJ1", "agentId": "product-builder", "autoReview": false }
+]
+```
 
 ### Phase 2 — Core Service Modules
 
@@ -81,12 +174,12 @@ Exports one function: `verifySignature(secret: string, body: string, sigHeader: 
 
 Implementation:
 - Return `false` immediately if `sigHeader` is null or does not start with `"sha256="`.
-- Import the secret as a `CryptoKey` using `crypto.subtle.importKey` with algorithm `HMAC / SHA-256`.
-- Compute the expected signature with `crypto.subtle.sign`.
-- Compare using `crypto.subtle.timingSafeEqual` (available in Workers runtime) to prevent timing attacks.
-- Return `true` only if signatures match.
+- Import the secret as a `CryptoKey` using `crypto.subtle.importKey` with algorithm `{ name: "HMAC", hash: "SHA-256" }` and `["verify"]` key usage.
+- Decode the hex digest from `sigHeader` (strip the `"sha256="` prefix) into a `Uint8Array`.
+- Use `crypto.subtle.verify("HMAC", key, signatureBytes, bodyBytes)` directly — this performs a constant-time comparison internally and is the correct Web Crypto API pattern. Do NOT use `crypto.subtle.sign` followed by a manual byte-by-byte comparison; the `verify` method is both simpler and correctly timing-safe.
+- Return the boolean result of `crypto.subtle.verify`.
 
-No npm dependencies. Web Crypto API only.
+No npm dependencies. Web Crypto API only. Note: `crypto.subtle.timingSafeEqual` does NOT exist in the Web Crypto standard or in the Cloudflare Workers runtime — using `crypto.subtle.verify` for HMAC is the correct replacement.
 
 **`src/parser.ts`**
 
@@ -139,12 +232,25 @@ All labels are in English. No emoji in message bodies (this is a machine-to-mach
 
 **`src/openclaw.ts`**
 
-Exports one function: `forwardToOpenClaw(url: string, token: string, message: string): Promise<void>`.
+Exports one function: `forwardToOpenClaw(route: RouteConfig, env: Env, message: string): Promise<void>`.
 
-POSTs to `${url}/hooks/agent` with:
-- `Authorization: Bearer ${token}`
+Resolves the actual token string by calling `resolveToken(route.openclawToken, env)` (defined in `config.ts`).
+
+POSTs to `${route.openclawUrl}/hooks/agent` with:
+- `Authorization: Bearer <resolved token>`
 - `Content-Type: application/json`
-- Body: `{ message, name: "GitHub", agentId: "product-builder" }`
+- Body:
+  ```json
+  {
+    "message": "<the built message>",
+    "name": "GitHub",
+    "agentId": "<route.agentId>",
+    "sessionKey": "hook:github",
+    "wakeMode": "now"
+  }
+  ```
+
+The `sessionKey` is hardcoded to `"hook:github"` because the OpenClaw config has `allowRequestSessionKey: false` — the value sent here will be ignored by OpenClaw anyway, but it is still sent for clarity and forward compatibility. The `wakeMode: "now"` instructs OpenClaw to process the message immediately rather than queuing.
 
 Throws on non-2xx response so the caller can log the error. Does not retry (fail-fast; GitHub will retry on non-200 response from the Worker, but the Worker always returns 200 — see `index.ts` note below).
 
@@ -158,21 +264,16 @@ The `fetch` handler orchestrates the pipeline:
 2. Call `verifySignature(env.GITHUB_WEBHOOK_SECRET, body, request.headers.get("X-Hub-Signature-256"))`. If `false`, return `new Response("Unauthorized", { status: 401 })`.
 3. Parse JSON body (wrap in try/catch; on parse failure, return 200 with body `"ignored: parse error"` — malformed payloads are silently dropped).
 4. Call `parseEvent(request.headers.get("x-github-event") ?? "unknown", data)`.
-5. Call `routeIntent(ev, env.AUTO_REVIEW === "true")`.
-6. If intent is `"ignore"`, return `new Response("ok", { status: 200 })` immediately.
-7. Call `buildMessage(ev, intent)`.
-8. Call `forwardToOpenClaw(env.OPENCLAW_URL, env.OPENCLAW_TOKEN, message)` inside a try/catch. Log errors to `console.error` but do not propagate — the Worker must always return 200 to GitHub to prevent redundant retries.
-9. Return `new Response("ok", { status: 200 })`.
+5. Call `loadRoutes(env.ROUTES_KV)` to fetch the routing table from KV.
+6. Call `resolveRoute(ev.repo, routes)`. If `null`, return `new Response("ok", { status: 200 })` silently — no configured route for this repo.
+7. Determine effective `autoReview`: use `route.autoReview` if defined, otherwise fall back to `env.AUTO_REVIEW === "true"`.
+8. Call `routeIntent(ev, effectiveAutoReview)`.
+9. If intent is `"ignore"`, return `new Response("ok", { status: 200 })` immediately.
+10. Call `buildMessage(ev, intent)`.
+11. Call `forwardToOpenClaw(route, env, message)` inside a try/catch. Log errors to `console.error` but do not propagate — the Worker must always return 200 to GitHub to prevent redundant retries.
+12. Return `new Response("ok", { status: 200 })`.
 
-The `Env` interface:
-```typescript
-interface Env {
-  GITHUB_WEBHOOK_SECRET: string;
-  OPENCLAW_URL: string;
-  OPENCLAW_TOKEN: string;
-  AUTO_REVIEW: string;  // "true" | "false" | undefined
-}
-```
+The `Env` interface is now defined in `src/types.ts` (see Phase 1b). `index.ts` imports it from there rather than defining it inline.
 
 ### Phase 4 — OpenClaw Skills
 
@@ -193,37 +294,46 @@ Documents the `github-code-mod` skill: when invoked with a `/fix` or `/implement
 ### Phase 5 — Validation and Deployment Notes
 
 1. Run `npm run check` (tsc --noEmit) to confirm no type errors.
-2. Set Worker Secrets via `wrangler secret put` for all four secrets.
-3. Run `wrangler dev` locally and send a test webhook payload using `curl` with a valid HMAC signature to verify the full pipeline.
-4. Deploy with `wrangler deploy`.
-5. Configure GitHub repository webhook: URL = Worker URL, Content-Type = `application/json`, Secret = the value of `GITHUB_WEBHOOK_SECRET`, Events = Issues, Pull requests, Issue comments, Pull request review comments.
+2. Create the KV namespace: `wrangler kv:namespace create ROUTES_KV`. Copy the returned `id` into `wrangler.toml`.
+3. Set Worker Secrets via `wrangler secret put` for `GITHUB_WEBHOOK_SECRET`, `AUTO_REVIEW`, and each per-route token secret (e.g. `TOKEN_PROJ1`, `TOKEN_PROJ2`). The old global `OPENCLAW_URL` and `OPENCLAW_TOKEN` secrets are no longer needed.
+4. Upload the initial routes config: `wrangler kv:key put --binding ROUTES_KV routes '<JSON array>'` (or paste via the Cloudflare dashboard).
+5. Run `wrangler dev` locally and send a test webhook payload using `curl` with a valid HMAC signature to verify the full pipeline, including route resolution.
+6. Deploy with `wrangler deploy`.
+7. Configure GitHub repository webhook: URL = Worker URL, Content-Type = `application/json`, Secret = the value of `GITHUB_WEBHOOK_SECRET`, Events = Issues, Pull requests, Issue comments, Pull request review comments.
 
 ## Progress
 
 - [ ] **Phase 1.1** — Create `package.json`
 - [ ] **Phase 1.2** — Create `tsconfig.json`
 - [ ] **Phase 1.3** — Create `wrangler.toml`
+- [ ] **Phase 1.4** — Create `.env.example`
+- [ ] **Phase 1b.1** — Create `src/types.ts` (`RouteConfig`, `Env` with KV binding and index signature)
+- [ ] **Phase 1b.2** — Create `src/config.ts` (`loadRoutes`, `resolveRoute`, `resolveToken`)
+- [ ] **Phase 1b.3** — Add `[[kv_namespaces]]` binding to `wrangler.toml`; remove global `OPENCLAW_URL` / `OPENCLAW_TOKEN` vars
+- [ ] **Phase 1b.4** — Update `.env.example` for per-route token pattern and sample KV JSON
 - [ ] **Phase 2.1** — Implement `src/verify.ts`
 - [ ] **Phase 2.2** — Implement `src/parser.ts` (types + `parseEvent`)
 - [ ] **Phase 2.3** — Implement `src/router.ts` (`routeIntent`)
 - [ ] **Phase 2.4** — Implement `src/message.ts` (`buildMessage`)
-- [ ] **Phase 2.5** — Implement `src/openclaw.ts` (`forwardToOpenClaw`)
-- [ ] **Phase 3.1** — Implement `src/index.ts` (Worker entry point)
+- [ ] **Phase 2.5** — Implement `src/openclaw.ts` (`forwardToOpenClaw` with `RouteConfig` + `Env` signature)
+- [ ] **Phase 3.1** — Implement `src/index.ts` (Worker entry point; includes `loadRoutes` + `resolveRoute` steps)
 - [ ] **Phase 4.1** — Write `skills/github-qa/SKILL.md`
 - [ ] **Phase 4.2** — Write `skills/github-review/SKILL.md`
 - [ ] **Phase 4.3** — Write `skills/github-code-mod/SKILL.md`
 - [ ] **Phase 5.1** — Run `npm run check`; fix any type errors
-- [ ] **Phase 5.2** — Local test with `wrangler dev` + curl test payload
-- [ ] **Phase 5.3** — Set Cloudflare Worker Secrets
-- [ ] **Phase 5.4** — Deploy with `wrangler deploy`
-- [ ] **Phase 5.5** — Configure GitHub webhook and verify end-to-end
+- [ ] **Phase 5.2** — Create KV namespace with `wrangler kv:namespace create ROUTES_KV`; update `wrangler.toml` with returned id
+- [ ] **Phase 5.3** — Set Cloudflare Worker Secrets (`GITHUB_WEBHOOK_SECRET`, `AUTO_REVIEW`, per-route token secrets)
+- [ ] **Phase 5.4** — Upload initial routes JSON to KV
+- [ ] **Phase 5.5** — Local test with `wrangler dev` + curl test payload (verify route resolution)
+- [ ] **Phase 5.6** — Deploy with `wrangler deploy`
+- [ ] **Phase 5.7** — Configure GitHub webhook and verify end-to-end
 
 ## Surprises & Discoveries
 
 <!-- Document unexpected behaviors, bugs, optimizations, or insights found during implementation. -->
 
 - **Known constraint:** `allowRequestSessionKey: false` in the OpenClaw config means all GitHub events share the `hook:github` session. Concurrent events could interleave in the same AI context window. This is acceptable for the current scale but may need addressing if event volume grows. No workaround is implemented.
-- **`timingSafeEqual` availability:** Cloudflare Workers' `crypto.subtle` does not expose `timingSafeEqual` directly — it is available on the Node.js `crypto` module but not the Web Crypto API standard. In Cloudflare Workers, the comparison must be done by converting both `ArrayBuffer` results to `Uint8Array` and comparing length + each byte, or by using the `nodejs_compat` compatibility flag. This should be verified during Phase 2.1.
+- **`timingSafeEqual` does not exist in Web Crypto:** `crypto.subtle.timingSafeEqual` is not part of the Web Crypto API standard and is not available in Cloudflare Workers. The correct constant-time verification approach is to use `crypto.subtle.verify("HMAC", key, signatureBytes, bodyBytes)` directly — the HMAC verify operation is specified to be constant-time. This is simpler and more correct than computing `sign` and then manually comparing bytes. The plan spec for `verify.ts` has been updated to use this approach. No `nodejs_compat` flag is needed.
 
 ## Decision Log
 
@@ -253,6 +363,30 @@ Documents the `github-code-mod` skill: when invoked with a `/fix` or `/implement
 
 - **Decision:** Skills are defined as `SKILL.md` files under `skills/`, not as code.
   **Rationale:** The `product-builder` agent interprets skills as documentation-driven instructions. Encoding them as Markdown files keeps them legible to both agents and humans (Golden Rule 10) and avoids adding a code execution surface to the Worker bundle.
+  **Date/Author:** 2026-03-23 / Planner Agent
+
+- **Decision:** Include `sessionKey: "hook:github"` and `wakeMode: "now"` explicitly in the OpenClaw POST body.
+  **Rationale:** `wakeMode: "now"` is required by the OpenClaw `/hooks/agent` API to trigger immediate processing. `sessionKey` is sent for documentation clarity even though OpenClaw ignores it when `allowRequestSessionKey: false`. Both fields are part of the OpenClaw API contract and must appear in the body per the API spec.
+  **Date/Author:** 2026-03-23 / Planner Agent
+
+- **Decision:** Commit `.env.example` with placeholder values to the repository.
+  **Rationale:** Documents the required secrets without exposing real values. Gives any implementer or contributor an immediate list of what secrets need to be provisioned. Real secrets are set via `wrangler secret put` and never committed.
+  **Date/Author:** 2026-03-23 / Planner Agent
+
+- **Decision:** Store the routing table as a JSON blob in Cloudflare KV (Option D: single key `routes` in the `ROUTES_KV` namespace) rather than in `wrangler.toml` vars, Worker env vars, or individual KV keys per repo.
+  **Rationale:** Route tables change frequently as new repos and OpenClaw instances are added. Option B (env vars) and Option C (wrangler.toml vars) both require a full Worker redeployment for every routing change, which is operationally fragile and creates a deployment gate around a config change. Option A (one KV key per repo) requires provisioning and querying multiple keys with no atomicity. A single JSON blob (Option D) can be updated via the Cloudflare dashboard or API in seconds without redeployment, keeps the entire routing table visible in one place, and degrades gracefully (empty array = ignore all). The only downside is that malformed JSON silently falls back to an empty route table — mitigated by type-guarding the parsed value and logging a warning.
+  **Date/Author:** 2026-03-23 / Planner Agent (rev 2)
+
+- **Decision:** Store token env-var names (e.g. `"$TOKEN_PROJ1"`) in KV rather than actual token values; resolve at runtime from Worker Secrets.
+  **Rationale:** Cloudflare KV is not a secret store — values are encrypted at rest but are visible in the Cloudflare dashboard to any account member and can be read by any code that has the KV binding. Worker Secrets are the correct Cloudflare primitive for sensitive values: they are write-only in the dashboard, never logged, and injected only into the Worker's environment at runtime. By storing a reference name in KV and resolving it from `env`, secrets stay in the secure store and can be rotated via `wrangler secret put` without touching the routing table. The `$`-prefix convention makes the indirection visually explicit and is validated at runtime before the first HTTP call. Golden Rule 2 (validate at boundaries).
+  **Date/Author:** 2026-03-23 / Planner Agent (rev 2)
+
+- **Decision:** Route resolution priority order: exact match > owner wildcard (`owner/*`) > global wildcard (`*`) > null (ignore).
+  **Rationale:** More specific rules should always win over more general ones. Exact-repo rules capture intentional per-repo configuration. Owner wildcards let a team route all of their repos to a shared agent without listing each one. The global wildcard acts as a catch-all default, matching the common pattern of a single-developer setup where all repos go to one agent. Returning `null` (not an error) for unmatched repos means the Worker silently accepts the webhook and returns 200 — consistent with the "always return 200 to GitHub" decision and prevents noise from organization-wide webhook subscriptions that include repos not yet configured.
+  **Date/Author:** 2026-03-23 / Planner Agent (rev 2)
+
+- **Decision:** Use `crypto.subtle.verify` for HMAC validation rather than `crypto.subtle.sign` + manual byte comparison.
+  **Rationale:** `crypto.subtle.verify` for HMAC is specified to be constant-time by the Web Crypto API spec and is available in all Cloudflare Workers runtimes. Manual byte comparison is error-prone and risks introducing a timing oracle. `timingSafeEqual` from Node.js `crypto` is not available in the standard Web Crypto API.
   **Date/Author:** 2026-03-23 / Planner Agent
 
 ## Outcomes & Retrospective
