@@ -1,82 +1,87 @@
 # claw-github-hook
 
+Cloudflare Worker that relays GitHub webhooks to a local [OpenClaw](https://openclaw.ai) AI agent. Receives issue/PR events, verifies signatures, routes intent, and forwards structured messages to OpenClaw via `/hooks/agent`.
+
 ## Quick Start
 
 ```bash
-# TODO: add build command
-# TODO: add test command
+npm install
+npm run check          # TypeScript type check
+npx wrangler dev       # Local dev server
+npx wrangler deploy    # Deploy to Cloudflare
 ```
 
-## Architecture Overview
+## Architecture
 
-<!-- Describe high-level system architecture in 3-5 sentences -->
-<!-- See docs/architecture.md for detailed layer definitions and dependency rules -->
+```
+GitHub Webhook → Cloudflare Worker → OpenClaw /hooks/agent → Agent + Skills
+```
 
-This project follows a layered domain architecture. See [Architecture](docs/architecture.md) for the full domain model, layer structure, and dependency rules.
+| Layer | Files | Responsibility |
+|---|---|---|
+| Types | `types.ts`, `parser.ts` | RouteConfig, Env, GitHubEvent, Intent |
+| Config | `config.ts`, `wrangler.toml` | KV routes, env secrets |
+| Service | `verify.ts`, `parser.ts`, `router.ts`, `message.ts` | Signature check, parse, route, format |
+| Runtime | `index.ts`, `openclaw.ts` | Worker entry point, OpenClaw forwarding |
+
+Dependencies flow strictly forward: `index.ts` → service modules → types. No circular imports.
 
 ## Repository Structure
 
 ```
 claw-github-hook/
-├── docs/                  # System of record for all project knowledge
-│   ├── architecture.md    # Domain model, layers, dependency rules
-│   ├── golden-rules.md    # Numbered principles (enforced by harness check)
-│   ├── design-docs/       # Design documentation for features and systems
-│   ├── exec-plans/        # Versioned execution plans with progress tracking
-│   ├── product-specs/     # Product specifications and requirements
-│   ├── references/        # External references and integration notes
-│   └── generated/         # Auto-generated artifacts (do not edit)
-├── .opencode/agents/      # OpenCode subagents (reviewer, planner, sweep)
-├── .claude/agents/        # Claude Code subagents (mirrors .opencode/agents/)
-└── .harness/rules/        # Custom lint rules (YAML)
+├── src/                   # Cloudflare Worker source
+│   ├── index.ts           # Entry point (fetch handler)
+│   ├── verify.ts          # HMAC-SHA256 signature verification
+│   ├── parser.ts          # GitHub payload → GitHubEvent
+│   ├── router.ts          # Intent routing (qa/code-review/code-mod/ignore)
+│   ├── message.ts         # Build structured message per intent
+│   ├── openclaw.ts        # POST to OpenClaw /hooks/agent
+│   ├── config.ts          # Load routes from KV, resolve tokens
+│   └── types.ts           # RouteConfig, Env interfaces
+├── skills/                # OpenClaw workspace skills (copy to OpenClaw)
+│   ├── github-qa/         # Answer questions via gh CLI
+│   ├── github-review/     # PR code review via gh CLI
+│   └── github-code-mod/   # Code modification via gh CLI
+├── docs/                  # Project documentation
+│   ├── architecture.md    # System design and data flow
+│   ├── golden-rules.md    # Enforced principles
+│   ├── design-docs/       # Feature design documentation
+│   └── exec-plans/        # Implementation plans with progress
+├── wrangler.toml          # Worker + KV config
+└── .env.example           # Secrets and KV routes sample
 ```
+
+## Key Concepts
+
+- **RouteConfig**: Maps GitHub repos to OpenClaw instances (`repo → agentId + URL + token`)
+- **Intent routing**: Pure function, rule-based (`@mention /command` → qa/review/code-mod)
+- **Bot mention**: Defaults to `@ghAccount`, customizable via `botMention` in route config
+- **gh CLI**: Skills use `gh` for all GitHub interactions, with `gh auth switch` for multi-account
 
 ## Golden Rules
 
-1. **AGENTS.md is a map, not a manual** — keep this file under 150 lines
-2. **Validate boundaries** — parse and validate data at system edges, never probe
-3. **Prefer shared utilities** — centralize invariants, avoid hand-rolled duplicates
-4. **Every decision gets logged** — use ExecPlans (exec-plan skill) for complex work
-5. **Fix the environment, not the prompt** — when agents struggle, add missing tools/docs/guardrails
+1. **AGENTS.md is a map, not a manual** — keep under 150 lines
+2. **Validate boundaries** — Zod-less type guards at system edges
+3. **Prefer shared utilities** — centralize invariants
+4. **Every decision gets logged** — ExecPlans for complex work
+5. **Fix the environment, not the prompt** — add tools/docs/guardrails
 
-See [Golden Rules](docs/golden-rules.md) for the complete list with rationale and enforcement.
+See [Golden Rules](docs/golden-rules.md) for the full list.
 
 ## Documentation
 
-All project knowledge lives in `docs/`. Start with the area relevant to your task:
-
-| Directory | Purpose |
+| Path | Purpose |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | System architecture, domains, layers |
-| [docs/golden-rules.md](docs/golden-rules.md) | Enforced principles and conventions |
-| [docs/design-docs/](docs/design-docs/) | Design documentation for features |
-| [docs/exec-plans/](docs/exec-plans/) | Execution plans for complex work |
-| [docs/product-specs/](docs/product-specs/) | Product specifications |
-| [docs/references/](docs/references/) | External docs, API references |
-| [docs/generated/](docs/generated/) | Auto-generated artifacts |
+| [docs/architecture.md](docs/architecture.md) | Data flow, layers, technology choices |
+| [docs/golden-rules.md](docs/golden-rules.md) | Enforced principles |
+| [docs/exec-plans/](docs/exec-plans/) | Implementation plans |
+| [.env.example](.env.example) | Config reference |
 
-## Working with This Repository
-
-- Before making changes, read the relevant design doc in `docs/design-docs/`
-- For complex work, create an ExecPlan using the exec-plan skill
-- Run `harness check` before submitting PRs
-- Follow the layer dependency rules in [docs/architecture.md](docs/architecture.md)
-- When something fails, ask: "What capability is missing?" — then add it
-
-## Build & Test Commands
+## Build & Test
 
 ```bash
-# TODO: add build command
-# TODO: add test command
+npm run check     # tsc --noEmit
+npm run dev       # wrangler dev (local)
+npm run deploy    # wrangler deploy
 ```
-
-## Code Style & Conventions
-
-<!-- Link to your linter config, formatting rules, naming conventions -->
-<!-- These should be mechanically enforced, not just documented -->
-
-Run `harness check` to validate project structure and documentation.
-
-## ExecPlans
-
-When writing complex features or significant refactors, use an ExecPlan (exec-plan skill) from design to implementation.
