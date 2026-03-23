@@ -20,7 +20,7 @@ The user has a working but unstructured proof-of-concept Cloudflare Worker (inli
 ### Key Concepts
 
 - **Cloudflare Worker** — Edge function that receives GitHub webhook POST requests. Runtime is the standard Web Crypto API (no Node.js built-ins). Secrets are stored as Cloudflare Worker Secrets, not in code.
-- **OpenClaw** — Local AI agent runner. Exposes a webhook endpoint at `/hooks/agent`. Configured with `token`, `defaultSessionKey: "hook:github"`, and `allowedAgentIds: ["product-builder"]`. Because `allowRequestSessionKey: false`, all events share a single session named `hook:github` — this is a known constraint and is not worked around.
+- **OpenClaw** — Local AI agent runner. Exposes a webhook endpoint at `/hooks/agent`. Configured with `token`, `defaultSessionKey: "hook:github"`, and `allowedAgentIds: ["<agent_id>"]`. Because `allowRequestSessionKey: false`, all events share a single session named `hook:github` — this is a known constraint and is not worked around.
 - **Intent** — A classification of what the GitHub event is asking for: `qa`, `code-review`, `code-mod`, or `ignore`. Routing is a pure function of the event payload.
 - **HMAC-SHA256** — GitHub signs every webhook payload with a secret using HMAC-SHA256, delivered in the `X-Hub-Signature-256` header. Verification uses only the Web Crypto API (no npm dependencies).
 - **Cloudflare Tunnel URL** — The URL of the running `cloudflared` tunnel that exposes the local OpenClaw instance. Stored per-route in the KV routes config (`openclawUrl` field of `RouteConfig`).
@@ -43,11 +43,11 @@ claw-github-hook/
 │   └── types.ts          — Shared TypeScript types: RouteConfig, Env (with KV binding)
 ├── skills/
 │   ├── github-qa/
-│   │   └── SKILL.md      — Guides product-builder agent to answer GitHub questions
+│   │   └── SKILL.md      — Guides the configured agent to answer GitHub questions
 │   ├── github-review/
-│   │   └── SKILL.md      — Guides product-builder agent to perform PR code review
+│   │   └── SKILL.md      — Guides the configured agent to perform PR code review
 │   └── github-code-mod/
-│       └── SKILL.md      — Guides product-builder agent to make code changes
+│       └── SKILL.md      — Guides the configured agent to make code changes
 ├── wrangler.toml         — Cloudflare Worker configuration
 ├── package.json          — Project manifest and dev dependencies
 ├── tsconfig.json         — TypeScript configuration for Workers runtime
@@ -91,7 +91,7 @@ export interface RouteConfig {
   repo: string;          // "owner/repo", "owner/*", or "*"
   openclawUrl: string;   // e.g. "https://xxx.trycloudflare.com"
   openclawToken: string; // env-var name to resolve, e.g. "$TOKEN_PROJ1"
-  agentId: string;       // OpenClaw agent ID, e.g. "product-builder"
+  agentId: string;       // OpenClaw agent ID, e.g. "<agent_id>"
   autoReview?: boolean;  // overrides global AUTO_REVIEW for this repo
 }
 
@@ -158,9 +158,9 @@ Add a comment block showing a sample `routes` JSON value for KV:
 
 ```json
 [
-  { "repo": "acme/backend",   "openclawUrl": "https://abc.trycloudflare.com", "openclawToken": "$TOKEN_PROJ1", "agentId": "product-builder" },
-  { "repo": "acme/frontend",  "openclawUrl": "https://def.trycloudflare.com", "openclawToken": "$TOKEN_PROJ2", "agentId": "product-builder" },
-  { "repo": "*",              "openclawUrl": "https://abc.trycloudflare.com", "openclawToken": "$TOKEN_PROJ1", "agentId": "product-builder", "autoReview": false }
+  { "repo": "acme/backend",   "openclawUrl": "https://abc.trycloudflare.com", "openclawToken": "$TOKEN_PROJ1", "agentId": "<api_agent_id>" },
+  { "repo": "acme/frontend",  "openclawUrl": "https://def.trycloudflare.com", "openclawToken": "$TOKEN_PROJ2", "agentId": "<web_agent_id>" },
+  { "repo": "*",              "openclawUrl": "https://abc.trycloudflare.com", "openclawToken": "$TOKEN_PROJ1", "agentId": "<default_agent_id>", "autoReview": false }
 ]
 ```
 
@@ -277,11 +277,11 @@ The `Env` interface is now defined in `src/types.ts` (see Phase 1b). `index.ts` 
 
 ### Phase 4 — OpenClaw Skills
 
-Three skill definition files that guide the `product-builder` agent.
+Three skill definition files that guide the configured OpenClaw agent.
 
 **`skills/github-qa/SKILL.md`**
 
-Documents the `github-qa` skill: when invoked, the agent reads the GitHub context message, identifies the question being asked, searches relevant code or documentation in the repository, and posts a clear answer back (via whatever output mechanism `product-builder` uses).
+Documents the `github-qa` skill: when invoked, the agent reads the GitHub context message, identifies the question being asked, searches relevant code or documentation in the repository, and posts a clear answer back using the configured agent's normal output mechanism.
 
 **`skills/github-review/SKILL.md`**
 
@@ -362,7 +362,7 @@ Documents the `github-code-mod` skill: when invoked with a `/fix` or `/implement
   **Date/Author:** 2026-03-23 / Planner Agent
 
 - **Decision:** Skills are defined as `SKILL.md` files under `skills/`, not as code.
-  **Rationale:** The `product-builder` agent interprets skills as documentation-driven instructions. Encoding them as Markdown files keeps them legible to both agents and humans (Golden Rule 10) and avoids adding a code execution surface to the Worker bundle.
+  **Rationale:** The configured OpenClaw agent interprets skills as documentation-driven instructions. Encoding them as Markdown files keeps them legible to both agents and humans (Golden Rule 10) and avoids adding a code execution surface to the Worker bundle.
   **Date/Author:** 2026-03-23 / Planner Agent
 
 - **Decision:** Include `sessionKey: "hook:github"` and `wakeMode: "now"` explicitly in the OpenClaw POST body.
@@ -398,5 +398,5 @@ Documents the `github-code-mod` skill: when invoked with a `/fix` or `/implement
   - PR review, Q&A, and code modification intents are correctly classified from @claw comments.
   - The Worker bundle has zero npm runtime dependencies and passes TypeScript strict checks.
   - Secrets are not stored in code or version control.
-  - The three SKILL.md files are usable by the product-builder agent without additional context.
+  - The three SKILL.md files are usable by the configured OpenClaw agent without additional context.
 -->

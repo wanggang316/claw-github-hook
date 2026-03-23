@@ -23,7 +23,7 @@ Cloudflare Worker (src/index.ts)
 OpenClaw Gateway (local :18789, via Cloudflare Tunnel)
   │
   ▼
-Agent (e.g. product-builder)
+Agent (e.g. <agent_id>)
   │ Reads workspace Skills
   ├── skills/github-qa/       ─ Answer questions
   ├── skills/github-review/   ─ PR code review
