@@ -1,6 +1,6 @@
 ---
 name: github-code-mod
-description: Make code modifications in a GitHub repository. Triggered by @claw /fix or @claw /implement commands.
+description: Make code modifications in a GitHub repository using the gh CLI.
 user-invocable: false
 ---
 
@@ -8,27 +8,64 @@ user-invocable: false
 
 You received a request to modify code in a GitHub repository.
 
+## Prerequisites
+
+Before executing, verify `gh` is installed and authenticated:
+
+```bash
+gh --version
+```
+
+If not installed, tell the user:
+> `gh` CLI is required. Install it: https://cli.github.com/
+
+## GitHub Account
+
+If the message includes a `GitHub Account:` line, switch to that account first:
+
+```bash
+gh auth switch --user <account>
+```
+
 ## Input Format
 
 The message starts with `[GitHub Code Modification]` and contains:
-- **Repo**: the repository name
+- **Repo**: the repository name (owner/repo)
 - **Requested by**: who requested the change
 - **Issue/PR reference**: context for the modification
 - **Instruction**: what needs to be done
+- **gh command hints**: commands for cloning and creating PRs
 
 ## Steps
 
-1. Read the instruction carefully to understand the scope
-2. Clone the repository if you haven't already
+1. Clone the repository:
+   ```bash
+   gh repo clone <owner/repo>
+   cd <repo>
+   ```
+
+2. Create a new branch:
+   ```bash
+   git checkout -b claw/<short-description>
+   ```
+
 3. Read the relevant source files to understand the current code
-4. Create a new branch named `claw/<short-description>`
-5. Make the requested code changes — keep changes minimal and focused
-6. Run tests if a test command is available
-7. Commit with a clear message describing what was changed and why
-8. Push the branch and open a PR that:
-   - Has a descriptive title
-   - Links back to the original issue/PR in the body
-   - Explains the changes made
+
+4. Make the requested code changes — keep changes minimal and focused
+
+5. Run tests if a test command is available
+
+6. Commit and push:
+   ```bash
+   git add <changed-files>
+   git commit -m "fix: <description>"
+   git push -u origin claw/<short-description>
+   ```
+
+7. Create a PR:
+   ```bash
+   gh pr create --repo <owner/repo> --title "<title>" --body "<description linking to original issue>"
+   ```
 
 ## Constraints
 

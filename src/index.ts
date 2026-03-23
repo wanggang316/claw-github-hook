@@ -52,7 +52,8 @@ export default {
     const autoReview = route.autoReview ?? env.AUTO_REVIEW === "true";
 
     // Route intent
-    const intent = routeIntent(ev, autoReview);
+    const botMention = route.botMention ?? "@claw";
+    const intent = routeIntent(ev, autoReview, botMention);
     if (intent === "ignore") {
       console.log("IGNORED: intent=ignore");
       return new Response("ok", { status: 200 });
@@ -60,7 +61,7 @@ export default {
     console.log(`INTENT: ${intent}`);
 
     // Build message and forward
-    const message = buildMessage(ev, intent);
+    const message = buildMessage(ev, intent, route);
     console.log(`MESSAGE: ${message.substring(0, 200)}...`);
 
     try {
