@@ -19,7 +19,6 @@ export async function forwardToOpenClaw(
       message,
       name: "GitHub",
       agentId: route.agentId,
-      sessionKey: "hook:github",
       wakeMode: "now",
     }),
   });

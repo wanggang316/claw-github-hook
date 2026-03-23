@@ -4,7 +4,7 @@ compatibility_date = "2024-09-23"
 
 [[kv_namespaces]]
 binding = "ROUTES_KV"
-id = "PLACEHOLDER_REPLACE_AFTER_KV_CREATE"
+id = "32657c43ae9249c5822ac4389b32388e"
 
 # Secrets (set via `wrangler secret put`):
 # GITHUB_WEBHOOK_SECRET — GitHub webhook HMAC secret

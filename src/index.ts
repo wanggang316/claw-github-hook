@@ -8,62 +8,68 @@ import { loadRoutes, resolveRoute } from "./config.js";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Only accept POST
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    // 1. Read raw body
     const body = await request.text();
 
-    // 2. Verify HMAC signature
+    // Verify HMAC signature
     const sigHeader = request.headers.get("X-Hub-Signature-256");
     const valid = await verifySignature(env.GITHUB_WEBHOOK_SECRET, body, sigHeader);
     if (!valid) {
+      console.log("REJECTED: invalid signature");
       return new Response("Unauthorized", { status: 401 });
     }
 
-    // 3. Parse JSON
+    // Parse JSON
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(body) as Record<string, unknown>;
     } catch {
+      console.log("REJECTED: JSON parse error");
       return new Response("ok", { status: 200 });
     }
 
-    // 4. Parse event
+    // Parse event
     const eventType = request.headers.get("x-github-event") ?? "unknown";
     const ev = parseEvent(eventType, data);
+    console.log(`EVENT: ${ev.event}/${ev.action} repo=${ev.repo} sender=${ev.sender} bot=${ev.isBot}`);
 
-    // 5. Load routes from KV
+    // Load routes from KV
     const routes = await loadRoutes(env.ROUTES_KV);
+    console.log(`ROUTES: loaded ${routes.length} route(s)`);
 
-    // 6. Resolve route for this repo
+    // Resolve route
     const route = resolveRoute(ev.repo, routes);
     if (!route) {
+      console.log(`IGNORED: no route for ${ev.repo}`);
       return new Response("ok", { status: 200 });
     }
+    console.log(`ROUTE: matched ${route.repo} -> ${route.agentId}@${route.openclawUrl}`);
 
-    // 7. Determine effective autoReview
+    // Determine effective autoReview
     const autoReview = route.autoReview ?? env.AUTO_REVIEW === "true";
 
-    // 8. Route intent
+    // Route intent
     const intent = routeIntent(ev, autoReview);
     if (intent === "ignore") {
+      console.log("IGNORED: intent=ignore");
       return new Response("ok", { status: 200 });
     }
+    console.log(`INTENT: ${intent}`);
 
-    // 9. Build message
+    // Build message and forward
     const message = buildMessage(ev, intent);
+    console.log(`MESSAGE: ${message.substring(0, 200)}...`);
 
-    // 10. Forward to OpenClaw (never propagate errors to GitHub)
     try {
       await forwardToOpenClaw(route, env, message);
+      console.log("FORWARDED: success");
     } catch (err) {
-      console.error("Failed to forward to OpenClaw:", err);
+      console.error("FORWARD FAILED:", err);
     }
 
-    // 11. Always return 200
     return new Response("ok", { status: 200 });
   },
 } satisfies ExportedHandler<Env>;
