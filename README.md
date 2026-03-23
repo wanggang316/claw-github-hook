@@ -33,161 +33,343 @@ GitHub (reply posted via gh CLI)
 
 ## Setup
 
-### Prerequisites
+### Step 0: Prerequisites
 
-- [Node.js](https://nodejs.org/) 20+
-- [Cloudflare account](https://dash.cloudflare.com/) — sign up at https://dash.cloudflare.com/
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/) — `npm install -g wrangler`, then `wrangler login`
-- [OpenClaw](https://openclaw.ai) running locally with hooks enabled
-- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) exposing your local OpenClaw Gateway
-- [GitHub CLI (gh)](https://cli.github.com/) installed and authenticated on the OpenClaw machine
+Install the following tools before starting:
 
-### 1. Install & Build
+**Node.js 20+**
+
+```bash
+# macOS
+brew install node
+
+# Verify
+node --version   # Should be v20+
+```
+
+**Wrangler CLI (Cloudflare Workers CLI)**
+
+```bash
+npm install -g wrangler
+wrangler login    # Opens browser to authenticate with your Cloudflare account
+```
+
+If you don't have a Cloudflare account, sign up at https://dash.cloudflare.com/.
+
+**GitHub CLI (gh)**
+
+```bash
+# macOS
+brew install gh
+
+# Authenticate
+gh auth login     # Follow the prompts, select GitHub.com, HTTPS, browser login
+
+# If you have multiple GitHub accounts, add them all:
+gh auth login     # Repeat for each account
+
+# Verify
+gh auth status    # Shows all authenticated accounts
+```
+
+**OpenClaw**
+
+Install and run OpenClaw following the guide at https://docs.openclaw.ai. Make sure hooks are enabled in your OpenClaw config:
+
+```json
+{
+  "hooks": {
+    "enabled": true,
+    "path": "/hooks",
+    "token": "your-secret-token",
+    "defaultSessionKey": "hook:github",
+    "allowRequestSessionKey": false,
+    "allowedAgentIds": ["product-builder"]
+  }
+}
+```
+
+Key fields:
+- `token` — you'll need this in Step 4 (it becomes `TOKEN_PROJ1`)
+- `allowedAgentIds` — add all agent IDs you plan to route to
+
+**cloudflared (Cloudflare Tunnel)**
+
+```bash
+# macOS
+brew install cloudflared
+
+# Verify
+cloudflared --version
+```
+
+### Step 1: Set Up Cloudflare Tunnel
+
+The tunnel exposes your local OpenClaw instance to the internet so the Cloudflare Worker can reach it.
+
+**Option A: Named tunnel with custom domain (recommended for production)**
+
+This gives you a stable URL that doesn't change on restart.
+
+```bash
+# 1. Login (if you haven't already)
+cloudflared tunnel login
+# Opens browser — select the domain you want to use
+
+# 2. Create the tunnel
+cloudflared tunnel create openclaw
+# Output:
+#   Tunnel credentials written to /Users/you/.cloudflared/<TUNNEL_ID>.json
+#   Created tunnel openclaw with id <TUNNEL_ID>
+# Save the TUNNEL_ID for the next step.
+
+# 3. Create config file
+cat > ~/.cloudflared/config.yml << 'EOF'
+tunnel: <TUNNEL_ID>
+credentials-file: /Users/you/.cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: openclaw.yourdomain.com
+    service: http://localhost:18789
+  - service: http_status:404
+EOF
+# Replace:
+#   <TUNNEL_ID> with the ID from step 2
+#   /Users/you/ with your actual home directory path
+#   openclaw.yourdomain.com with your chosen subdomain
+#   18789 with your OpenClaw Gateway port (18789 is the default)
+
+# 4. Add DNS record
+cloudflared tunnel route dns openclaw openclaw.yourdomain.com
+# This creates a CNAME record in Cloudflare DNS automatically
+
+# 5. Start the tunnel
+cloudflared tunnel run openclaw
+# Keep this running. Your OpenClaw is now reachable at:
+#   https://openclaw.yourdomain.com
+```
+
+**Option B: Quick tunnel (for testing only)**
+
+```bash
+cloudflared tunnel --url http://localhost:18789
+# Output:
+#   Your quick Tunnel has been created! Visit it at:
+#   https://random-words.trycloudflare.com
+# ⚠️ This URL changes every time you restart the tunnel.
+# You'll need to update your KV routes config each time.
+```
+
+**Verify the tunnel works:**
+
+```bash
+curl https://openclaw.yourdomain.com/api/v1/check
+# Should return a 200 response from OpenClaw
+```
+
+### Step 2: Clone and Install
 
 ```bash
 git clone https://github.com/your-org/claw-github-hook.git
 cd claw-github-hook
 npm install
-npm run check
+npm run check    # Should show no errors
 ```
 
-### 2. Create KV Namespace
+### Step 3: Create KV Namespace
+
+KV (Key-Value) stores the routing config that maps GitHub repos to OpenClaw agents.
 
 ```bash
 wrangler kv namespace create ROUTES_KV
+# Output:
+#   ✨ Success!
+#   Add the following to your configuration file:
+#   [[kv_namespaces]]
+#   binding = "ROUTES_KV"
+#   id = "abc123..."
 ```
 
-Copy the returned `id` into `wrangler.toml`, replacing the placeholder value.
+Copy the `id` value and edit `wrangler.toml`:
 
-### 3. Set Secrets
+```toml
+[[kv_namespaces]]
+binding = "ROUTES_KV"
+id = "abc123..."   # ← paste your actual ID here
+```
+
+### Step 4: Set Worker Secrets
+
+Secrets are sensitive values stored securely in Cloudflare, not in code.
 
 ```bash
+# 1. Generate and set the webhook secret
+openssl rand -hex 32
+# Copy the output, then:
 wrangler secret put GITHUB_WEBHOOK_SECRET
+# Paste the random string when prompted
+# ⚠️ Save this string — you'll need it again in Step 7 for GitHub webhook config
+
+# 2. Set auto-review preference
 wrangler secret put AUTO_REVIEW
+# Enter: false (or true if you want every PR auto-reviewed)
+
+# 3. Set OpenClaw token
 wrangler secret put TOKEN_PROJ1
+# Enter: the token from your OpenClaw hooks config (Step 0)
+# This is the hooks.token value from your OpenClaw config.json
 ```
 
-How to get each value:
-
-| Secret | How to get it |
-|---|---|
-| `GITHUB_WEBHOOK_SECRET` | Generate a random string (e.g. `openssl rand -hex 32`). You'll use this same string when configuring the GitHub webhook in Step 6. |
-| `AUTO_REVIEW` | Enter `"true"` to automatically review every PR when opened, or `"false"` to only review when explicitly asked via `@mention /review`. |
-| `TOKEN_PROJ1` | From your OpenClaw config: this is the `token` value in your OpenClaw hooks configuration (e.g. in `~/.openclaw/config.json` under `hooks.token`). |
-
-### 4. Upload Routes
-
-Routes tell the Worker which repos go to which OpenClaw agent. Each route maps a GitHub repo to an OpenClaw instance.
+If you have multiple OpenClaw instances with different tokens, add more secrets:
 
 ```bash
-wrangler kv key put routes '<JSON array>' --binding ROUTES_KV --remote
+wrangler secret put TOKEN_PROJ2
+wrangler secret put TOKEN_PROJ3
 ```
 
-Example (single command, all on one line):
+### Step 5: Upload Routes
+
+Routes tell the Worker which GitHub repos go to which OpenClaw agent.
+
+**Minimal setup (all repos → one agent):**
 
 ```bash
-wrangler kv key put routes '[{"repo":"*","openclawUrl":"https://openclaw.example.com","openclawToken":"$TOKEN_PROJ1","agentId":"product-builder","ghAccount":"my-github-user"}]' --binding ROUTES_KV --remote
+wrangler kv key put routes '[{"repo":"*","openclawUrl":"https://openclaw.yourdomain.com","openclawToken":"$TOKEN_PROJ1","agentId":"product-builder","ghAccount":"your-github-username"}]' --binding ROUTES_KV --remote
 ```
 
-How to get each field:
+Replace:
+- `https://openclaw.yourdomain.com` — your tunnel URL from Step 1
+- `$TOKEN_PROJ1` — keep as-is, this references the secret from Step 4
+- `product-builder` — your OpenClaw agent ID (run `openclaw agents list` to find it)
+- `your-github-username` — your GitHub username (the bot will respond to `@your-github-username`)
 
-| Field | How to get it |
-|---|---|
-| `repo` | The GitHub repo to match, in `"owner/repo"` format. Use `"owner/*"` to match all repos under an owner. Use `"*"` as a catch-all default. |
-| `openclawUrl` | Your Cloudflare Tunnel URL that exposes OpenClaw. If using a named tunnel with custom domain: `"https://openclaw.yourdomain.com"`. If using a quick tunnel: the `*.trycloudflare.com` URL (changes on restart). |
-| `openclawToken` | Reference to a Worker Secret by name, prefixed with `$`. E.g. `"$TOKEN_PROJ1"` resolves to the value you set via `wrangler secret put TOKEN_PROJ1`. If you have multiple OpenClaw instances with different tokens, create multiple secrets (`TOKEN_PROJ1`, `TOKEN_PROJ2`, etc.). |
-| `agentId` | The OpenClaw agent ID to route to. Find it in your OpenClaw config — run `openclaw agents list` or check `~/.openclaw/agents/`. Examples: `"product-builder"`, `"code-reviewer"`, `"default"`. |
-| `ghAccount` | *(Optional)* Your GitHub username for this route. Used for two things: (1) the bot responds to `@ghAccount` mentions in comments, (2) runs `gh auth switch --user <ghAccount>` before any `gh` command. Find your GitHub username at https://github.com/settings/profile. |
-| `botMention` | *(Optional)* Override the trigger mention. If omitted, defaults to `@ghAccount` (if set) or `@claw`. Example: `"@my-ai-bot"`. |
-| `autoReview` | *(Optional)* `true` or `false`. Override the global `AUTO_REVIEW` setting for this specific repo. |
+**Multi-repo setup:**
 
-Multi-repo example:
-
-```json
-[
-  {
-    "repo": "myorg/backend",
-    "openclawUrl": "https://openclaw.mysite.com",
-    "openclawToken": "$TOKEN_PROJ1",
-    "agentId": "backend-dev",
-    "ghAccount": "my-bot-account"
-  },
-  {
-    "repo": "myorg/frontend",
-    "openclawUrl": "https://openclaw.mysite.com",
-    "openclawToken": "$TOKEN_PROJ1",
-    "agentId": "frontend-dev",
-    "ghAccount": "my-bot-account",
-    "autoReview": true
-  },
-  {
-    "repo": "*",
-    "openclawUrl": "https://openclaw.mysite.com",
-    "openclawToken": "$TOKEN_PROJ1",
-    "agentId": "product-builder"
-  }
-]
+```bash
+wrangler kv key put routes '[{"repo":"myorg/api","openclawUrl":"https://openclaw.mysite.com","openclawToken":"$TOKEN_PROJ1","agentId":"backend-dev","ghAccount":"bot-account"},{"repo":"myorg/web","openclawUrl":"https://openclaw.mysite.com","openclawToken":"$TOKEN_PROJ1","agentId":"frontend-dev","ghAccount":"bot-account","autoReview":true},{"repo":"*","openclawUrl":"https://openclaw.mysite.com","openclawToken":"$TOKEN_PROJ1","agentId":"product-builder"}]' --binding ROUTES_KV --remote
 ```
 
-Route resolution priority: exact repo match → owner wildcard (`owner/*`) → global wildcard (`*`).
+**Route field reference:**
 
-### 5. Deploy
+| Field | Required | Description | How to get it |
+|---|---|---|---|
+| `repo` | Yes | GitHub repo pattern | `"owner/repo"` for exact match, `"owner/*"` for all repos under an owner, `"*"` as catch-all default |
+| `openclawUrl` | Yes | Tunnel URL | From Step 1: `https://openclaw.yourdomain.com` (named) or `https://xxx.trycloudflare.com` (quick) |
+| `openclawToken` | Yes | Token reference | `"$TOKEN_PROJ1"` — the `$` prefix + the secret name from Step 4 |
+| `agentId` | Yes | OpenClaw agent ID | Run `openclaw agents list` or check `~/.openclaw/agents/` |
+| `ghAccount` | No | GitHub username | Your username from https://github.com/settings/profile — enables `@username` mentions and `gh auth switch` |
+| `botMention` | No | Custom trigger | Defaults to `@ghAccount` if set, otherwise `@claw`. Override with e.g. `"@my-ai-bot"` |
+| `autoReview` | No | Auto-review PRs | `true` / `false` — overrides global `AUTO_REVIEW` for this repo |
+
+Route resolution priority: exact match → owner wildcard (`owner/*`) → global wildcard (`*`).
+
+### Step 6: Deploy the Worker
 
 ```bash
 wrangler deploy
+# Output:
+#   Published claw-github-hook (x.xx sec)
+#   https://claw-github-hook.your-account.workers.dev
+# Save this URL for Step 7
 ```
 
-The output shows your Worker URL (e.g. `https://claw-github-hook.xxx.workers.dev`).
+### Step 7: Configure GitHub Webhook
 
-### 6. Configure GitHub Webhook
+Go to your GitHub repo: **Settings → Webhooks → Add webhook**
 
-In your GitHub repo (or org): **Settings → Webhooks → Add webhook**
+1. **Payload URL**: paste your Worker URL from Step 6
+   - Example: `https://claw-github-hook.your-account.workers.dev`
 
-| Field | Value | How to get it |
-|---|---|---|
-| Payload URL | Your Worker URL | From Step 5 output, e.g. `https://claw-github-hook.xxx.workers.dev` |
-| Content type | `application/json` | Select from dropdown |
-| Secret | Your webhook secret | The same random string you entered for `GITHUB_WEBHOOK_SECRET` in Step 3 |
-| Events | Individual events | Select "Let me select individual events", then check: **Issues**, **Issue comments**, **Pull requests**, **Pull request review comments** |
+2. **Content type**: select `application/json`
 
-### 7. Install Skills in OpenClaw
+3. **Secret**: paste the same random string you set as `GITHUB_WEBHOOK_SECRET` in Step 4
+   - If you lost it, generate a new one and update: `wrangler secret put GITHUB_WEBHOOK_SECRET`
 
-Copy the skills to your OpenClaw workspace:
+4. **Which events?**: select "Let me select individual events", then check:
+   - ☑ Issues
+   - ☑ Issue comments
+   - ☑ Pull requests
+   - ☑ Pull request review comments
+   - Uncheck everything else
+
+5. Click **Add webhook**
+
+GitHub will send a `ping` event. Check the **Recent Deliveries** tab — it should show a 200 response.
+
+To configure webhooks for an entire organization instead of per-repo, go to **Organization Settings → Webhooks** and follow the same steps.
+
+### Step 8: Install Skills in OpenClaw
+
+The skills guide OpenClaw's agent on how to handle each type of GitHub event.
 
 ```bash
+# Option A: Copy (one-time)
 cp -r skills/* ~/.openclaw/skills/
-```
 
-Or symlink them so they stay in sync with this repo:
-
-```bash
+# Option B: Symlink (stays in sync with this repo)
 ln -s $(pwd)/skills/github-qa ~/.openclaw/skills/github-qa
 ln -s $(pwd)/skills/github-review ~/.openclaw/skills/github-review
 ln -s $(pwd)/skills/github-code-mod ~/.openclaw/skills/github-code-mod
 ```
 
+Verify skills are loaded — restart OpenClaw or wait for the skills watcher to pick them up.
+
+### Step 9: Verify End-to-End
+
+1. Make sure OpenClaw is running and the Cloudflare Tunnel is active
+2. Go to a GitHub issue in your configured repo
+3. Post a comment: `@your-github-username hello, can you see this?`
+4. Watch the Worker logs: `wrangler tail`
+5. Check OpenClaw logs for the incoming message
+
+If the Worker log shows `FORWARDED: success` but OpenClaw doesn't respond, check:
+- Is the tunnel URL correct and reachable?
+- Is the agent ID correct?
+- Are the skills installed in the OpenClaw workspace?
+
 ## Usage
 
-Once configured, mention the bot in any GitHub issue or PR comment to trigger it.
+Once everything is set up, mention the bot in any GitHub issue or PR comment.
 
 ### Bot Mention
 
 The bot responds to mentions based on this priority:
 
 1. **`botMention`** in route config (if set) — e.g. `@my-ai-bot`
-2. **`@ghAccount`** (if `ghAccount` is set) — e.g. `@superada2026`
-3. **`@claw`** (default fallback)
+2. **`@ghAccount`** (if `ghAccount` is set in route config) — e.g. `@superada2026`
+3. **`@claw`** (default fallback when neither is set)
 
 ### Commands
 
 | Comment | Action |
 |---|---|
-| `@superada2026 what does this function do?` | **Q&A** — agent answers the question and posts a reply |
-| `@superada2026 /review` | **Code Review** — agent fetches the PR diff and posts a review |
-| `@superada2026 /fix null pointer in auth.ts` | **Code Mod** — agent fixes the code and opens a PR |
-| `@superada2026 /implement add input validation` | **Code Mod** — agent implements the feature and opens a PR |
+| `@mention what does this function do?` | **Q&A** — agent answers the question and posts a reply |
+| `@mention /review` | **Code Review** — agent fetches the PR diff and posts a review |
+| `@mention /fix null pointer in auth.ts` | **Code Mod** — agent fixes the code and opens a PR |
+| `@mention /implement add input validation` | **Code Mod** — agent implements the feature and opens a PR |
 
-*(Replace `@superada2026` with your configured bot mention.)*
+*(Replace `@mention` with your bot mention — see priority above.)*
+
+## Updating Routes
+
+To change routing without redeploying:
+
+```bash
+wrangler kv key put routes '<new JSON>' --binding ROUTES_KV --remote
+```
+
+Changes take effect immediately — no `wrangler deploy` needed.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| GitHub shows 401 | Signature mismatch | Ensure `GITHUB_WEBHOOK_SECRET` matches the GitHub webhook Secret field |
+| Worker log: `IGNORED: no route` | No matching route in KV | Check `wrangler kv key get routes --binding ROUTES_KV --remote` and verify repo name matches |
+| Worker log: `IGNORED: intent=ignore` | Comment doesn't contain the bot mention | Check which mention is configured — run `wrangler tail` to see the logs |
+| Worker log: `FORWARD FAILED: 530` | Tunnel is down or URL changed | Restart `cloudflared tunnel run` and update KV routes if using quick tunnel |
+| Worker log: `FORWARD FAILED: 400` | OpenClaw rejected the request | Check OpenClaw logs; verify `agentId` is in `allowedAgentIds` |
+| OpenClaw receives message but doesn't reply | Skills not installed or `gh` not authenticated | Run `gh auth status` and check `~/.openclaw/skills/` |
 
 ## Development
 
