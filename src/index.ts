@@ -52,7 +52,7 @@ export default {
     const autoReview = route.autoReview ?? env.AUTO_REVIEW === "true";
 
     // Route intent
-    const botMention = route.botMention ?? "@claw";
+    const botMention = route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
     const intent = routeIntent(ev, autoReview, botMention);
     if (intent === "ignore") {
       console.log("IGNORED: intent=ignore");

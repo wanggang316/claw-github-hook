@@ -16,7 +16,7 @@ export function buildMessage(ev: GitHubEvent, intent: Intent, route: RouteConfig
 }
 
 function buildQAMessage(ev: GitHubEvent, route: RouteConfig): string {
-  const mention = route.botMention ?? "@claw";
+  const mention = route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
   const question = stripMention(ev.commentBody, mention);
   const ref = ev.prNumber
     ? `PR #${ev.prNumber}: ${ev.prTitle}\n${ev.prUrl}`
@@ -59,7 +59,7 @@ function buildCodeReviewMessage(ev: GitHubEvent, route: RouteConfig): string {
 }
 
 function buildCodeModMessage(ev: GitHubEvent, route: RouteConfig): string {
-  const mention = route.botMention ?? "@claw";
+  const mention = route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
   const instruction = stripMention(ev.commentBody, mention)
     .replace(/^\/fix\s*/i, "")
     .replace(/^\/implement\s*/i, "")
