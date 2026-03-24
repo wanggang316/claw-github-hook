@@ -62,12 +62,27 @@ The message contains XML-tagged sections:
 
 ## Immediate Feedback
 
-If `<comment_id>` is present, add a reaction to acknowledge receipt:
+If `<comment_id>` is present, run:
 
 ```bash
 gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
   --method POST --field content=eyes
 ```
+
+If the reaction fails, continue the task.
+
+## Completion Reaction
+
+Post the final GitHub comment with `--body-file`. Keep it short and include: status, what changed, validation, and any blocker or next step.
+
+If `<comment_id>` is present, run after the final GitHub comment is posted:
+
+```bash
+gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
+  --method POST --field content=rocket
+```
+
+If the reaction fails, do not block completion.
 
 ## Context Gathering (CRITICAL — Do NOT Skip)
 
@@ -98,11 +113,22 @@ gh api repos/<owner>/<repo>/commits/<sha> --jq '{message: .commit.message, files
 gh issue view <referenced-number> --repo <owner/repo> --comments
 ```
 
-#### Step 3: Clone the repo
+#### Step 3: If you cannot find local code, clone the repo with `gh`
+
+If the repository is not already present in your workspace, you MAY and SHOULD fetch it with `gh` before making changes:
 
 ```bash
 gh repo clone <owner/repo>
 cd <repo>
+```
+
+If you already have a local checkout, reuse it instead of cloning again.
+
+If the target directory already exists, clone into a fresh directory name:
+
+```bash
+gh repo clone <owner/repo> <repo>-tmp
+cd <repo>-tmp
 ```
 
 #### Step 4: Read project docs BEFORE writing any code
@@ -122,11 +148,11 @@ grep -r "<function-name>" src/
 
 Understand: how the code is called, naming conventions, import/export patterns, error handling, test patterns.
 
-## Steps
+## Execution Flow
 
-1. **Add 👀 reaction** (if `<comment_id>` available)
+1. **Run `Immediate Feedback` if `<comment_id>` exists**
 
-2. **Gather context** following all steps above
+2. **Follow `Context Gathering (CRITICAL — Do NOT Skip)` before making any changes**
 
 3. **Set up your branch** — check the `<branch_strategy>` tag:
    - If `checkout_pr`: check out the existing PR branch:
@@ -179,12 +205,23 @@ Understand: how the code is called, naming conventions, import/export patterns, 
    )"
    ```
 
-10. **Post a comment** on the original issue/PR linking to the new PR:
-    ```bash
-    gh issue comment <number> --repo <owner/repo> --body "I've created PR #<pr-number> to address this: <pr-url>"
-    ```
+10. **Draft exactly one final status comment** in Markdown
 
-11. **Add 🚀 reaction** when done (if `<comment_id>` available)
+11. **Post the final comment on the original thread**:
+    - If `<is_pr>` is `true`:
+      ```bash
+      gh pr comment <number> --repo <owner/repo> --body-file /tmp/github-code-mod-comment.md
+      ```
+    - If `<is_pr>` is `false`:
+      ```bash
+      gh issue comment <number> --repo <owner/repo> --body-file /tmp/github-code-mod-comment.md
+      ```
+
+12. **Run `Completion Reaction` if `<comment_id>` exists**
+
+## Final Comment Rule (CRITICAL)
+
+You MUST always leave one final GitHub comment before finishing. **Even if anything fails or is blocked, you still must post the final comment.**
 
 ## Constraints
 

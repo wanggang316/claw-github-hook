@@ -65,12 +65,27 @@ The message contains XML-tagged sections:
 
 ## Immediate Feedback
 
-If `<comment_id>` is present, add a reaction to acknowledge receipt:
+If `<comment_id>` is present, run:
 
 ```bash
 gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
   --method POST --field content=eyes
 ```
+
+If the reaction fails, continue the task.
+
+## Completion Reaction
+
+Post the final GitHub comment with `--body-file`. Keep it short and include: result, evidence checked, and any blocker or next step.
+
+If `<comment_id>` is present, run after the final GitHub comment is posted:
+
+```bash
+gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
+  --method POST --field content=rocket
+```
+
+If the reaction fails, do not block completion.
 
 ## Context Gathering (CRITICAL — Do NOT Skip)
 
@@ -110,11 +125,22 @@ gh issue view <referenced-number> --repo <owner/repo> --comments
 gh api repos/<owner>/<repo>/commits/<sha> --jq '{message: .commit.message, files: [.files[] | {filename, status, changes}]}'
 ```
 
-#### Step 4: If you still lack sufficient context, clone the repo and read docs
+#### Step 4: If local code is unavailable or you still lack sufficient context, clone the repo and read docs
+
+If the repository is not already present in your workspace, you MAY and SHOULD fetch it with `gh` before answering code-specific questions:
 
 ```bash
 gh repo clone <owner/repo>
 cd <repo>
+```
+
+If you already have a local checkout, reuse it instead of cloning again.
+
+If the target directory already exists, clone into a fresh directory name:
+
+```bash
+gh repo clone <owner/repo> <repo>-tmp
+cd <repo>-tmp
 ```
 
 Read in order of priority:
@@ -133,19 +159,19 @@ gh api repos/<owner>/<repo>/contents/<file-path> --jq '.content' | base64 -d
 cat <file-path>
 ```
 
-## Steps
+## Execution Flow
 
-1. Add 👀 reaction (if `<comment_id>` available)
+1. Run `Immediate Feedback` if `<comment_id>` exists
 2. Read `<trigger_comment>` — understand the question
 3. Use pre-fetched `<pr_body>`/`<issue_body>` and `<pr_metadata>`/`<issue_metadata>`
-4. Fetch remaining context (comments, diff, source) as needed
+4. Follow `Context Gathering (CRITICAL — Do NOT Skip)` and fetch the remaining context you need (comments, diff, source)
 5. Formulate a clear, accurate answer
-6. Post your answer using the gh command from `<instructions>`
-7. Add 🚀 reaction when done (if `<comment_id>` available):
-   ```bash
-   gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
-     --method POST --field content=rocket
-   ```
+6. Draft exactly one final reply in Markdown and post it with `gh issue comment <number> --repo <owner/repo> --body-file <file>`
+7. Run `Completion Reaction` if `<comment_id>` exists
+
+## Final Comment Rule (CRITICAL)
+
+You MUST always leave one final GitHub comment before finishing. **Even if anything fails or is blocked, you still must post the final comment.**
 
 ## Answer Format
 

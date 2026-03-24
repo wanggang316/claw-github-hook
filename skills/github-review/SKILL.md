@@ -61,12 +61,27 @@ The message contains XML-tagged sections:
 
 ## Immediate Feedback
 
-If `<comment_id>` is present, add a reaction to acknowledge receipt:
+If `<comment_id>` is present, run:
 
 ```bash
 gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
   --method POST --field content=eyes
 ```
+
+If the reaction fails, continue the task.
+
+## Completion Reaction
+
+Post the final PR review/comment with `--body-file`. Keep it short and include: summary, key findings or status, and any blocker or next step.
+
+If `<comment_id>` is present, run after the final PR review/comment is posted:
+
+```bash
+gh api repos/<owner>/<repo>/issues/comments/<comment_id>/reactions \
+  --method POST --field content=rocket
+```
+
+If the reaction fails, do not block completion.
 
 ## Context Gathering (CRITICAL — Do NOT Skip)
 
@@ -112,11 +127,22 @@ gh api repos/<owner>/<repo>/pulls/<number>/comments --jq '.[] | "\(.user.login) 
 gh issue view <issue-number> --repo <owner/repo> --comments
 ```
 
-#### Step 6: Clone the repo and read project docs
+#### Step 6: Clone the repo if local code is unavailable, then read project docs
+
+If the repository is not already present locally, you MAY and SHOULD fetch it with `gh` before reviewing code outside the diff:
 
 ```bash
 gh repo clone <owner/repo>
 cd <repo>
+```
+
+If you already have a local checkout, reuse it instead of cloning again.
+
+If the target directory already exists, clone into a fresh directory name:
+
+```bash
+gh repo clone <owner/repo> <repo>-tmp
+cd <repo>-tmp
 ```
 
 Read in order of priority:
@@ -137,11 +163,11 @@ Read complete files being modified to understand:
 gh api repos/<owner>/<repo>/contents/<file-path> --jq '.content' | base64 -d
 ```
 
-## Steps
+## Execution Flow
 
-1. Add 👀 reaction (if `<comment_id>` available)
+1. Run `Immediate Feedback` if `<comment_id>` exists
 2. Use pre-fetched `<pr_body>` and `<pr_metadata>` — skip re-fetching these
-3. Fetch remaining context (comments, commits, diff, reviews, source)
+3. Follow `Context Gathering (CRITICAL — Do NOT Skip)` and fetch the remaining context you need (comments, commits, diff, reviews, source)
 4. Fetch the full PR diff:
    ```bash
    gh pr diff <number> --repo <owner/repo>
@@ -177,8 +203,14 @@ gh api repos/<owner>/<repo>/contents/<file-path> --jq '.content' | base64 -d
    - Whether existing tests still pass conceptually
    - Edge cases that should be tested
 
-6. Post your review using the gh command from `<instructions>`
-7. Add 🚀 reaction when done (if `<comment_id>` available)
+6. Draft exactly one final review message in Markdown
+7. If you completed the review, post it with `gh pr review <number> --repo <owner/repo> --comment --body-file <file>`
+8. If you were blocked or could not finish the review, post the status with `gh pr comment <number> --repo <owner/repo> --body-file <file>`
+9. Run `Completion Reaction` if `<comment_id>` exists
+
+## Final Comment Rule (CRITICAL)
+
+You MUST always leave one final GitHub comment before finishing. **Even if anything fails or is blocked, you still must post the final comment.**
 
 ## Review Format
 
