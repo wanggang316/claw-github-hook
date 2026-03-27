@@ -47,6 +47,7 @@ export interface GitHubEvent {
   commentId: number | null;
 
   // Review fields (pull_request_review event)
+  reviewId: number | null;
   reviewState: string;
   reviewBody: string;
 }
@@ -115,6 +116,7 @@ export function parseEvent(event: string, body: Record<string, unknown>): GitHub
     commentBody: sanitize(str(comment?.body)),
     commentId: num(comment?.id),
 
+    reviewId: num(review?.id),
     reviewState: str(review?.state),
     reviewBody: sanitize(str(review?.body)),
   };
