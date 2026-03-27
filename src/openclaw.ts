@@ -1,8 +1,8 @@
-import type { RouteConfig, Env } from "./types.js";
+import type { ResolvedRoute, Env } from "./types.js";
 import { resolveToken } from "./config.js";
 
 export async function forwardToOpenClaw(
-  route: RouteConfig,
+  route: ResolvedRoute,
   env: Env,
   message: string,
 ): Promise<void> {

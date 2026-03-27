@@ -34,19 +34,30 @@ export default {
     // Parse event
     const eventType = request.headers.get("x-github-event") ?? "unknown";
     const ev = parseEvent(eventType, data);
-    console.log(`EVENT: ${ev.event}/${ev.action} repo=${ev.repo} sender=${ev.sender} bot=${ev.isBot}`);
+    console.log(
+      `EVENT: ${ev.event}/${ev.action} install=${ev.installationId ?? "none"} owner=${ev.owner} repo=${ev.repo} sender=${ev.sender} bot=${ev.isBot}`,
+    );
 
     // Load routes from KV
     const routes = await loadRoutes(env.ROUTES_KV);
-    console.log(`ROUTES: loaded ${routes.length} route(s)`);
+    console.log(`ROUTES: loaded ${routes.length} org route(s)`);
 
     // Resolve route
-    const route = resolveRoute(ev.repo, routes);
+    const route = resolveRoute(
+      {
+        installationId: ev.installationId,
+        owner: ev.owner,
+        repo: ev.repoName,
+      },
+      routes,
+    );
     if (!route) {
-      console.log(`IGNORED: no route for ${ev.repo}`);
+      console.log(`IGNORED: no route for installation=${ev.installationId ?? "none"} owner=${ev.owner} repo=${ev.repoName}`);
       return new Response("ok", { status: 200 });
     }
-    console.log(`ROUTE: matched ${route.repo} -> ${route.agentId}@${route.openclawUrl}`);
+    console.log(
+      `ROUTE: matched owner=${route.owner} repo=${route.repo} install=${route.installationId ?? "none"} -> ${route.agentId}@${route.openclawUrl}`,
+    );
 
     // Determine effective autoReview
     const autoReview = route.autoReview ?? env.AUTO_REVIEW === "true";

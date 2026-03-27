@@ -1,11 +1,11 @@
 # claw-github-hook
 
-A Cloudflare Worker that relays GitHub webhook events to a local [OpenClaw](https://openclaw.ai) AI agent, enabling AI-powered Q&A, code review, and code modification directly from GitHub issues and pull requests.
+A Cloudflare Worker that receives GitHub App webhook events and relays them to a local [OpenClaw](https://openclaw.ai) AI agent, enabling AI-powered Q&A, code review, and code modification directly from GitHub issues and pull requests.
 
 ## How It Works
 
 ```
-GitHub Webhook (issue/PR event)
+GitHub App Webhook (issue/PR event)
   │
   ▼ HTTPS POST
 Cloudflare Worker (edge)
@@ -26,7 +26,7 @@ GitHub (reply posted via gh CLI)
 
 - **HMAC-SHA256 signature verification** — rejects forged webhooks
 - **Intent routing** — `@mention /review`, `@mention /fix`, `@mention <question>`
-- **Multi-repo routing** — route different repos to different OpenClaw agents via Cloudflare KV
+- **Multi-org routing** — route installations and repos to different OpenClaw agents via Cloudflare KV
 - **Multi-account support** — `gh auth switch` per route for multiple GitHub accounts
 - **Custom bot mention** — defaults to `@ghAccount`, configurable per route
 - **Zero runtime dependencies** — Web Crypto API only, no npm packages at runtime
@@ -114,7 +114,7 @@ npm run check    # Should show no errors
 
 Install Wrangler CLI if you haven't: `npm install -g wrangler && wrangler login`
 
-KV (Key-Value) stores the routing config that maps GitHub repos to OpenClaw agents.
+KV (Key-Value) stores the routing config that maps GitHub App installations and repos to OpenClaw agents.
 
 ```bash
 wrangler kv namespace create ROUTES_KV
@@ -188,42 +188,60 @@ wrangler secret put TOKEN_PROJ3
 
 ### Step 5: Upload Routes
 
-Routes tell the Worker which GitHub repos go to which OpenClaw agent.
+Routes tell the Worker which GitHub App installation and repo go to which OpenClaw agent.
 
-**Minimal setup (all repos → one agent):**
+**Recommended setup (organization defaults + repo overrides):**
 
 ```bash
-wrangler kv key put routes '[{"repo":"*","openclawUrl":"https://openclaw.yourdomain.com","openclawToken":"$TOKEN_PROJ1","agentId":"<agent_id>","ghAccount":"your-github-username"}]' --binding ROUTES_KV --remote
+wrangler kv key put routes '[
+  {
+    "installationId": 12345678,
+    "owner": "myorg",
+    "defaults": {
+      "openclawUrl": "https://openclaw.yourdomain.com",
+      "openclawToken": "$TOKEN_PROJ1",
+      "agentId": "<default_agent_id>",
+      "ghAccount": "your-github-username",
+      "autoReview": true
+    },
+    "repos": {
+      "api": {
+        "agentId": "<api_agent_id>"
+      },
+      "web": {
+        "agentId": "<web_agent_id>",
+        "autoReview": false
+      }
+    }
+  }
+]' --binding ROUTES_KV --remote
 ```
 
 Replace:
 
+- `12345678` — your GitHub App installation ID
+- `myorg` — the organization login
 - `https://openclaw.yourdomain.com` — your tunnel URL from Step 1
 - `$TOKEN_PROJ1` — keep as-is, this references the secret from Step 4
-- `<agent_id>` — your OpenClaw agent ID (run `openclaw agents list` to find it)
-- `your-github-username` — your GitHub username (the bot will respond to `@your-github-username`)
-
-**Multi-repo setup:**
-
-```bash
-wrangler kv key put routes '[{"repo":"myorg/api","openclawUrl":"https://openclaw.mysite.com","openclawToken":"$TOKEN_PROJ1","agentId":"<api_agent_id>","ghAccount":"bot-account"},{"repo":"myorg/web","openclawUrl":"https://openclaw.mysite.com","openclawToken":"$TOKEN_PROJ1","agentId":"<web_agent_id>","ghAccount":"bot-account","autoReview":true},{"repo":"*","openclawUrl":"https://openclaw.mysite.com","openclawToken":"$TOKEN_PROJ1","agentId":"<default_agent_id>"}]' --binding ROUTES_KV --remote
-```
+- `<default_agent_id>` / `<api_agent_id>` / `<web_agent_id>` — your OpenClaw agent IDs
+- `your-github-username` — your GitHub username if you want `gh auth switch` and `@username` mention defaults
 
 **Route field reference:**
 
+| Field | Required | Description |
+| --- | --- | --- |
+| `installationId` | No but recommended | GitHub App installation ID; best primary key in multi-org setups |
+| `owner` | Yes | Organization login used as readable key and fallback matcher |
+| `defaults` | Yes | Default OpenClaw target for the installation/org |
+| `repos` | No | Repo-name keyed overrides, for example `"api"` or `"web"` |
+| `defaults.openclawUrl` | Yes | Tunnel URL from Step 1 |
+| `defaults.openclawToken` | Yes | Token reference like `"$TOKEN_PROJ1"` |
+| `defaults.agentId` | Yes | Default OpenClaw agent ID |
+| `defaults.ghAccount` | No | GitHub username for `gh auth switch` |
+| `defaults.botMention` | No | Custom trigger mention |
+| `defaults.autoReview` | No | Default PR auto-review policy |
 
-| Field           | Required | Description         | How to get it                                                                                                                                     |
-| --------------- | -------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `repo`          | Yes      | GitHub repo pattern | `"owner/repo"` for exact match, `"owner/*"` for all repos under an owner, `"*"` as catch-all default                                              |
-| `openclawUrl`   | Yes      | Tunnel URL          | From Step 1: `https://openclaw.yourdomain.com` (named) or `https://xxx.trycloudflare.com` (quick)                                                 |
-| `openclawToken` | Yes      | Token reference     | `"$TOKEN_PROJ1"` — the `$` prefix + the secret name from Step 4                                                                                   |
-| `agentId`       | Yes      | OpenClaw agent ID   | Run `openclaw agents list` or check `~/.openclaw/agents/`                                                                                         |
-| `ghAccount`     | No       | GitHub username     | Your username from [https://github.com/settings/profile](https://github.com/settings/profile) — enables `@username` mentions and `gh auth switch` |
-| `botMention`    | No       | Custom trigger      | Defaults to `@ghAccount` if set, otherwise `@claw`. Override with e.g. `"@my-ai-bot"`                                                             |
-| `autoReview`    | No       | Auto-review PRs     | `true` / `false` — overrides global `AUTO_REVIEW` for this repo                                                                                   |
-
-
-Route resolution priority: exact match → owner wildcard (`owner/`*) → global wildcard (`*`).
+Route resolution priority: `installationId` → `owner` → `defaults` merged with `repos[repoName]`.
 
 ### Step 6: Deploy the Worker
 
@@ -235,26 +253,25 @@ wrangler deploy
 # Save this URL for Step 7
 ```
 
-### Step 7: Configure GitHub Webhook
+### Step 7: Configure the GitHub App
 
-Go to your GitHub repo: **Settings → Webhooks → Add webhook**
+Create a GitHub App and set its webhook URL to your Worker URL from Step 6.
 
-1. **Payload URL**: paste your Worker URL from Step 6
-  - Example: `https://claw-github-hook.your-account.workers.dev`
-2. **Content type**: select `application/json`
-3. **Secret**: paste the same random string you set as `GITHUB_WEBHOOK_SECRET` in Step 4
-  - If you lost it, generate a new one and update: `wrangler secret put GITHUB_WEBHOOK_SECRET`
-4. **Which events?**: select "Let me select individual events", then check:
-  - ☑ Issues
-  - ☑ Issue comments
-  - ☑ Pull requests
-  - ☑ Pull request review comments
-  - Uncheck everything else
-5. Click **Add webhook**
+1. Go to **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**
+2. Set **Webhook URL** to your Worker URL
+3. Set **Webhook secret** to the same value as `GITHUB_WEBHOOK_SECRET`
+4. Subscribe only to:
+  - `Issue comment`
+  - `Pull request`
+  - `Pull request review comment`
+5. Grant repository permissions:
+  - `Metadata: Read-only`
+  - `Issues: Read-only`
+  - `Pull requests: Read-only`
+6. Install the App into each target organization
+7. For each installation, either select all repositories or the subset you want routed
 
-GitHub will send a `ping` event. Check the **Recent Deliveries** tab — it should show a 200 response.
-
-To configure webhooks for an entire organization instead of per-repo, go to **Organization Settings → Webhooks** and follow the same steps.
+GitHub will send webhook deliveries to the App webhook automatically after installation.
 
 ### Step 8: Install Skills in OpenClaw
 
@@ -347,7 +364,7 @@ Changes take effect immediately — no `wrangler deploy` needed.
 | Symptom                                     | Cause                                          | Fix                                                                                          |
 | ------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | GitHub shows 401                            | Signature mismatch                             | Ensure `GITHUB_WEBHOOK_SECRET` matches the GitHub webhook Secret field                       |
-| Worker log: `IGNORED: no route`             | No matching route in KV                        | Check `wrangler kv key get routes --binding ROUTES_KV --remote` and verify repo name matches |
+| Worker log: `IGNORED: no route`             | No matching installation/org route in KV      | Check `wrangler kv key get routes --binding ROUTES_KV --remote` and verify `installationId`, `owner`, and repo override names |
 | Worker log: `IGNORED: intent=ignore`        | Comment doesn't contain the bot mention        | Check which mention is configured — run `wrangler tail` to see the logs                      |
 | Worker log: `FORWARD FAILED: 530`           | Tunnel is down or URL changed                  | Restart `cloudflared tunnel run` and update KV routes if using quick tunnel                  |
 | Worker log: `FORWARD FAILED: 400`           | OpenClaw rejected the request                  | Check OpenClaw logs; verify `agentId` is in `allowedAgentIds`                                |

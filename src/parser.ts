@@ -13,6 +13,9 @@ export interface GitHubEvent {
   event: string;
   action: string;
   eventType: EventType;
+  installationId: number | null;
+  owner: string;
+  repoName: string;
   repo: string;
   sender: string;
   isBot: boolean;
@@ -50,8 +53,11 @@ export interface GitHubEvent {
 
 export function parseEvent(event: string, body: Record<string, unknown>): GitHubEvent {
   const repo = nested(body, "repository", "full_name") ?? "";
+  const repoName = nested(body, "repository", "name") ?? "";
+  const owner = nested2(body, "repository", "owner", "login") ?? "";
   const sender = nested(body, "sender", "login") ?? "";
   const senderType = nested(body, "sender", "type") ?? "";
+  const installationId = nestedNumber(body, "installation", "id");
 
   const pr = body.pull_request as Record<string, unknown> | undefined;
   const issue = body.issue as Record<string, unknown> | undefined;
@@ -79,6 +85,9 @@ export function parseEvent(event: string, body: Record<string, unknown>): GitHub
     event,
     action,
     eventType: "unknown",
+    installationId,
+    owner,
+    repoName,
     repo,
     sender,
     isBot: sender.includes("[bot]") || senderType === "Bot",
@@ -147,4 +156,29 @@ function nested(obj: Record<string, unknown>, key1: string, key2: string): strin
     if (typeof val === "string") return val;
   }
   return undefined;
+}
+
+function nested2(
+  obj: Record<string, unknown>,
+  key1: string,
+  key2: string,
+  key3: string,
+): string | undefined {
+  const child = obj[key1];
+  if (typeof child !== "object" || child === null) return undefined;
+
+  const grandchild = (child as Record<string, unknown>)[key2];
+  if (typeof grandchild !== "object" || grandchild === null) return undefined;
+
+  const val = (grandchild as Record<string, unknown>)[key3];
+  return typeof val === "string" ? val : undefined;
+}
+
+function nestedNumber(obj: Record<string, unknown>, key1: string, key2: string): number | null {
+  const child = obj[key1];
+  if (typeof child === "object" && child !== null) {
+    const val = (child as Record<string, unknown>)[key2];
+    if (typeof val === "number") return val;
+  }
+  return null;
 }

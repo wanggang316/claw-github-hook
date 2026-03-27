@@ -2,19 +2,19 @@
 
 ## System Overview
 
-claw-github-hook is a Cloudflare Worker that acts as a secure relay between GitHub webhooks and a local OpenClaw AI agent. It receives GitHub events at the edge, verifies their authenticity, classifies intent, and forwards structured messages to OpenClaw via Cloudflare Tunnel. OpenClaw's agent then uses the `gh` CLI to interact with GitHub.
+claw-github-hook is a Cloudflare Worker that acts as a secure relay between GitHub App webhooks and a local OpenClaw AI agent. It receives GitHub events at the edge, verifies their authenticity, classifies intent, resolves the target OpenClaw route by installation and repo, and forwards structured messages to OpenClaw via Cloudflare Tunnel. OpenClaw's agent then uses the `gh` CLI to interact with GitHub.
 
 ## Data Flow
 
 ```
-GitHub Webhook
+GitHub App Webhook
   │ POST with X-Hub-Signature-256
   ▼
 Cloudflare Worker (src/index.ts)
   │
   ├── verify.ts     ─ HMAC-SHA256 signature verification (Web Crypto API)
   ├── parser.ts      ─ Raw payload → typed GitHubEvent
-  ├── config.ts      ─ Load RouteConfig[] from KV, resolve route for repo
+  ├── config.ts      ─ Load OrgRouteConfig[] from KV, resolve route for installation/org/repo
   ├── router.ts      ─ GitHubEvent + route → Intent (qa/code-review/code-mod/ignore)
   ├── message.ts     ─ Intent → structured message with gh CLI hints
   └── openclaw.ts    ─ POST message to OpenClaw /hooks/agent
@@ -41,7 +41,7 @@ Types → Config → Service → Runtime
 
 | Layer | Files | Responsibility |
 |---|---|---|
-| **Types** | `types.ts`, interfaces in `parser.ts` | `RouteConfig`, `Env`, `GitHubEvent`, `Intent` |
+| **Types** | `types.ts`, interfaces in `parser.ts` | `OrgRouteConfig`, `ResolvedRoute`, `Env`, `GitHubEvent`, `Intent` |
 | **Config** | `config.ts`, `wrangler.toml`, KV namespace | Route loading, token resolution, env secrets |
 | **Service** | `verify.ts`, `parser.ts`, `router.ts`, `message.ts` | Stateless processing: verify, parse, route, format |
 | **Runtime** | `index.ts`, `openclaw.ts` | Worker fetch handler, HTTP forwarding |
@@ -58,23 +58,27 @@ No UI layer — GitHub itself is the user interface.
 
 ## Key Abstractions
 
-### RouteConfig
+### OrgRouteConfig
 
-Maps a GitHub repo (or wildcard pattern) to an OpenClaw instance:
+Maps a GitHub App installation and owner to an OpenClaw default target, with optional per-repo overrides:
 
 ```typescript
-interface RouteConfig {
-  repo: string;          // "owner/repo", "owner/*", or "*"
-  openclawUrl: string;   // Cloudflare Tunnel URL
-  openclawToken: string; // "$ENV_VAR_NAME" (resolved at runtime)
-  agentId: string;       // OpenClaw agent ID
-  ghAccount?: string;    // For gh auth switch
-  botMention?: string;   // Custom trigger mention
-  autoReview?: boolean;  // Auto-review PRs on open
+interface OrgRouteConfig {
+  installationId?: number;
+  owner: string;
+  defaults: {
+    openclawUrl: string;
+    openclawToken: string;
+    agentId: string;
+    ghAccount?: string;
+    botMention?: string;
+    autoReview?: boolean;
+  };
+  repos?: Record<string, Partial<RouteTarget>>;
 }
 ```
 
-Resolution priority: exact match → owner wildcard → global wildcard → null (ignore).
+Resolution priority: installation match → owner match → merge defaults with `repos[repoName]` → null (ignore).
 
 ### Intent Routing
 
