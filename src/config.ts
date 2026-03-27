@@ -1,17 +1,50 @@
-import type { RouteConfig, Env } from "./types.js";
+import type { OrgRouteConfig, Env, ResolvedRoute, RouteLookup, RouteTarget } from "./types.js";
 
-function isRouteConfig(value: unknown): value is RouteConfig {
+function isRouteTarget(value: unknown): value is RouteTarget {
   if (typeof value !== "object" || value === null) return false;
   const obj = value as Record<string, unknown>;
   return (
-    typeof obj.repo === "string" &&
     typeof obj.openclawUrl === "string" &&
     typeof obj.openclawToken === "string" &&
     typeof obj.agentId === "string"
   );
 }
 
-export async function loadRoutes(kv: KVNamespace): Promise<RouteConfig[]> {
+function isRepoOverrides(value: unknown): value is Record<string, Partial<RouteTarget>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+
+  for (const override of Object.values(value as Record<string, unknown>)) {
+    if (typeof override !== "object" || override === null || Array.isArray(override)) {
+      return false;
+    }
+
+    for (const [key, field] of Object.entries(override)) {
+      if (!["openclawUrl", "openclawToken", "agentId", "autoReview", "ghAccount", "botMention"].includes(key)) {
+        return false;
+      }
+      if (key === "autoReview") {
+        if (field !== undefined && typeof field !== "boolean") return false;
+        continue;
+      }
+      if (field !== undefined && typeof field !== "string") return false;
+    }
+  }
+
+  return true;
+}
+
+function isOrgRouteConfig(value: unknown): value is OrgRouteConfig {
+  if (typeof value !== "object" || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    typeof obj.owner === "string" &&
+    (obj.installationId === undefined || typeof obj.installationId === "number") &&
+    isRouteTarget(obj.defaults) &&
+    (obj.repos === undefined || isRepoOverrides(obj.repos))
+  );
+}
+
+export async function loadRoutes(kv: KVNamespace): Promise<OrgRouteConfig[]> {
   try {
     const raw = await kv.get("routes");
     if (!raw) return [];
@@ -20,29 +53,30 @@ export async function loadRoutes(kv: KVNamespace): Promise<RouteConfig[]> {
       console.warn("KV routes value is not an array, falling back to empty routes");
       return [];
     }
-    return parsed.filter(isRouteConfig);
+    return parsed.filter(isOrgRouteConfig);
   } catch (err) {
     console.warn("Failed to load routes from KV:", err);
     return [];
   }
 }
 
-export function resolveRoute(repo: string, routes: RouteConfig[]): RouteConfig | null {
-  const owner = repo.split("/")[0];
+export function resolveRoute(lookup: RouteLookup, routes: OrgRouteConfig[]): ResolvedRoute | null {
+  const orgRoute = (
+    lookup.installationId !== null
+      ? routes.find((route) => route.installationId === lookup.installationId)
+      : null
+  ) ?? routes.find((route) => route.owner === lookup.owner);
 
-  // 1. Exact match
-  const exact = routes.find((r) => r.repo === repo);
-  if (exact) return exact;
+  if (!orgRoute) return null;
 
-  // 2. Owner wildcard
-  const ownerWild = routes.find((r) => r.repo === `${owner}/*`);
-  if (ownerWild) return ownerWild;
-
-  // 3. Global wildcard
-  const global = routes.find((r) => r.repo === "*");
-  if (global) return global;
-
-  return null;
+  const repoOverride = orgRoute.repos?.[lookup.repo];
+  return {
+    ...orgRoute.defaults,
+    ...repoOverride,
+    installationId: lookup.installationId,
+    owner: lookup.owner,
+    repo: lookup.repo,
+  };
 }
 
 export function resolveToken(tokenRef: string, env: Env): string {

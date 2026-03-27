@@ -1,8 +1,8 @@
 import type { GitHubEvent } from "./parser.js";
 import type { Intent } from "./router.js";
-import type { RouteConfig } from "./types.js";
+import type { ResolvedRoute } from "./types.js";
 
-export function buildMessage(ev: GitHubEvent, intent: Intent, route: RouteConfig): string {
+export function buildMessage(ev: GitHubEvent, intent: Intent, route: ResolvedRoute): string {
   switch (intent) {
     case "qa":
       return buildQAMessage(ev, route);
@@ -19,7 +19,7 @@ export function buildMessage(ev: GitHubEvent, intent: Intent, route: RouteConfig
 // QA
 // ---------------------------------------------------------------------------
 
-function buildQAMessage(ev: GitHubEvent, route: RouteConfig): string {
+function buildQAMessage(ev: GitHubEvent, route: ResolvedRoute): string {
   const mention = botMention(route);
   const question = stripMention(ev.commentBody, mention);
 
@@ -41,7 +41,7 @@ function buildQAMessage(ev: GitHubEvent, route: RouteConfig): string {
 // Code Review
 // ---------------------------------------------------------------------------
 
-function buildCodeReviewMessage(ev: GitHubEvent, route: RouteConfig): string {
+function buildCodeReviewMessage(ev: GitHubEvent, route: ResolvedRoute): string {
   return [
     xmlMeta(ev, route, `Code review requested by ${ev.sender}`),
     xmlEntityContext(ev),
@@ -62,7 +62,7 @@ function buildCodeReviewMessage(ev: GitHubEvent, route: RouteConfig): string {
 // Code Modification
 // ---------------------------------------------------------------------------
 
-function buildCodeModMessage(ev: GitHubEvent, route: RouteConfig): string {
+function buildCodeModMessage(ev: GitHubEvent, route: ResolvedRoute): string {
   const mention = botMention(route);
   const instruction = stripMention(ev.commentBody, mention)
     .replace(/^\/fix\s*/i, "")
@@ -92,12 +92,14 @@ function buildCodeModMessage(ev: GitHubEvent, route: RouteConfig): string {
 // XML building blocks
 // ---------------------------------------------------------------------------
 
-function xmlMeta(ev: GitHubEvent, route: RouteConfig, triggerContext: string): string {
+function xmlMeta(ev: GitHubEvent, route: ResolvedRoute, triggerContext: string): string {
   const lines = [
     tag("event_type", ev.eventType),
     tag("trigger_context", triggerContext),
     tag("trigger_username", ev.sender),
     tag("is_pr", ev.prNumber !== null ? "true" : "false"),
+    tag("installation_id", ev.installationId !== null ? String(ev.installationId) : ""),
+    tag("owner", ev.owner),
     tag("repo", ev.repo),
   ];
 
@@ -182,7 +184,7 @@ function branchStrategy(ev: GitHubEvent): string {
   return tag("branch_strategy", "new_branch\nCreate a new feature branch for this change.");
 }
 
-function botMention(route: RouteConfig): string {
+function botMention(route: ResolvedRoute): string {
   return route.botMention ?? (route.ghAccount ? `@${route.ghAccount}` : "@claw");
 }
 
