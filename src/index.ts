@@ -5,6 +5,7 @@ import { routeIntent } from "./router.js";
 import { buildMessage } from "./message.js";
 import { forwardToOpenClaw } from "./openclaw.js";
 import { loadRoutes, resolveRoute } from "./config.js";
+import { claimDelivery, claimEvent } from "./dedupe.js";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -33,10 +34,17 @@ export default {
 
     // Parse event
     const eventType = request.headers.get("x-github-event") ?? "unknown";
+    const deliveryId = request.headers.get("x-github-delivery");
     const ev = parseEvent(eventType, data);
     console.log(
-      `EVENT: ${ev.event}/${ev.action} install=${ev.installationId ?? "none"} owner=${ev.owner} repo=${ev.repo} sender=${ev.sender} bot=${ev.isBot}`,
+      `EVENT: ${ev.event}/${ev.action} delivery=${deliveryId ?? "none"} install=${ev.installationId ?? "none"} owner=${ev.owner} repo=${ev.repo} sender=${ev.sender} bot=${ev.isBot}`,
     );
+
+    const firstDelivery = await claimDelivery(env.ROUTES_KV, deliveryId);
+    if (!firstDelivery) {
+      console.log(`IGNORED: duplicate delivery ${deliveryId}`);
+      return new Response("ok", { status: 200 });
+    }
 
     // Load routes from KV
     const routes = await loadRoutes(env.ROUTES_KV);
@@ -70,6 +78,14 @@ export default {
       return new Response("ok", { status: 200 });
     }
     console.log(`INTENT: ${intent}`);
+
+    const firstEvent = await claimEvent(env.ROUTES_KV, ev);
+    if (!firstEvent) {
+      console.log(
+        `IGNORED: duplicate event ${ev.event}/${ev.action} repo=${ev.repo} comment=${ev.commentId ?? "none"} review=${ev.reviewId ?? "none"} pr=${ev.prNumber ?? "none"}`,
+      );
+      return new Response("ok", { status: 200 });
+    }
 
     // Build message and forward
     const message = buildMessage(ev, intent, route);
